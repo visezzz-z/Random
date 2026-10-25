@@ -1,6 +1,7 @@
--- ASCRON | MM2 AutoFarm v16 (farm fix + ESP completo)
+-- ASCRON | MM2 AutoFarm v17
+-- Bag multi-source | Death/round detection | ESP throttled
 
-print("[ASCRON] === v16 loading ===")
+print("[ASCRON] === v17 loading ===")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -59,7 +60,6 @@ local defaults = {
     AutoShootSheriff = true, AutoResetAnyRole = false,
     AutoKillMurderer = true, AutoResetMurderer = false,
     BagThresholdOverride = 0, ResetAfterAction = true,
-    -- ESP
     ESPEnabled = false, TracersEnabled = false, ChamsEnabled = false, OutlinesEnabled = false,
     ESPShowMurderer = true, ESPShowSheriff = true, ESPShowHero = true, ESPShowInnocent = true,
     ESPCoin = false, ESPGun = false,
@@ -98,40 +98,64 @@ local function getPlayerData()
     return pdCache.data
 end
 
--- ===================== BAG =====================
+-- ===================== ROUND STATE =====================
+local function isInActiveRound()
+    local data = getPlayerData()
+    if not data then return true end
+    local me = data[LocalPlayer.Name]
+    if not me then return true end
+    if me.Dead == true or me.Killed == true then return false end
+    if me.Role == "None" then return false end
+    return true
+end
+
+-- ===================== BAG (multi-source, pattern match) =====================
 local EVENT_CURRENCIES = { Candy=true, SnowToken=true, Token=true, Shell=true, Egg=true, Present=true, Gift=true, Gem=true }
 local function getBagThreshold()
     if C.BagThresholdOverride and C.BagThresholdOverride > 0 then return C.BagThresholdOverride end
     if EVENT_CURRENCIES[C.Currency] then return 50 end
     return 40
 end
-local CURRENCY_ALIASES = {
-    Coin = {"Coins","Coin","coin","coins"},
-    Candy = {"Candy","Candies","candy","candies"},
-    SnowToken = {"SnowToken","SnowTokens","Snow Tokens"},
-    Token = {"Token","Tokens"},
-    Shell = {"Shell","Shells"},
-}
+local BAG_PATTERNS = {"coin","cand","token","shell","egg","present","gift","gem","snow"}
+
 local function getStatValue()
+    local values = {}
     local ls = LocalPlayer:FindFirstChild("leaderstats")
-    local aliases = CURRENCY_ALIASES[C.Currency] or {C.Currency}
     if ls then
-        for _, name in ipairs(aliases) do
-            local st = ls:FindFirstChild(name)
-            if st and typeof(st.Value) == "number" then return st.Value end
+        for _, child in ipairs(ls:GetChildren()) do
+            if (child:IsA("IntValue") or child:IsA("NumberValue")) then
+                local n = child.Name:lower()
+                for _, p in ipairs(BAG_PATTERNS) do
+                    if n:find(p) then table.insert(values, child.Value); break end
+                end
+            end
         end
     end
-    for _, name in ipairs(aliases) do
-        local ok, v = pcall(function() return LocalPlayer:GetAttribute(name) end)
-        if ok and type(v) == "number" then return v end
-    end
+    pcall(function()
+        for attrName, val in pairs(LocalPlayer:GetAttributes()) do
+            if type(val) == "number" then
+                local n = attrName:lower()
+                for _, p in ipairs(BAG_PATTERNS) do
+                    if n:find(p) then table.insert(values, val); break end
+                end
+            end
+        end
+    end)
     local data = getPlayerData()
     if data and data[LocalPlayer.Name] then
-        local me = data[LocalPlayer.Name]
-        for _, name in ipairs(aliases) do if type(me[name]) == "number" then return me[name] end end
-        if type(me.Bag) == "number" then return me.Bag end
+        for k, v in pairs(data[LocalPlayer.Name]) do
+            if type(v) == "number" and v >= 0 and v <= 500 then
+                local n = tostring(k):lower()
+                for _, p in ipairs(BAG_PATTERNS) do
+                    if n:find(p) then table.insert(values, v); break end
+                end
+            end
+        end
     end
-    return nil
+    if #values == 0 then return nil end
+    local max = values[1]
+    for i = 2, #values do if values[i] > max then max = values[i] end end
+    return max
 end
 
 -- ===================== NOCLIP =====================
@@ -247,8 +271,7 @@ end
 
 -- ===================== COLETA =====================
 local function getCurrencyContainers()
-    local containers = {}
-    local seen = {}
+    local containers, seen = {}, {}
     local function addIfExists(c)
         if c and not seen[c] then seen[c] = true; table.insert(containers, c) end
     end
@@ -299,13 +322,9 @@ local function collect(coin)
         if typeof(firetouchinterest) == "function" then
             local torso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
             if torso then
-                firetouchinterest(torso, coin, 0)
-                task.wait(0.02)
-                firetouchinterest(torso, coin, 1)
+                firetouchinterest(torso, coin, 0); task.wait(0.02); firetouchinterest(torso, coin, 1)
             end
-            firetouchinterest(hrp, coin, 0)
-            task.wait(0.02)
-            firetouchinterest(hrp, coin, 1)
+            firetouchinterest(hrp, coin, 0); task.wait(0.02); firetouchinterest(hrp, coin, 1)
         end
     end)
     task.wait(0.03)
@@ -334,6 +353,7 @@ local function travelTo(targetPos, rotate90, speed, coinRef)
         if coinRef and not coinRef.Parent then return false end
         local curHum = getHum()
         if not curHum or curHum.Health <= 0 then return false end
+        if not isInActiveRound() then return false end
         local delta = targetPos - h.Position
         local dist = delta.Magnitude
         if dist < 2.5 then
@@ -499,14 +519,16 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
--- ===================== FARM LOOP (fix: coin-driven) =====================
+-- ===================== FARM LOOP =====================
 local function startFarm()
     if C.Farming then return end
     C.Farming = true
     C.FarmThread = task.spawn(function()
         while C.Farming do
             local hum = getHum()
-            if not hum or hum.Health <= 0 then
+            if not hum or hum.Health <= 0 or not isInActiveRound() then
+                local hrp = getHRP()
+                if hrp and hrp.Anchored then endFarmMovement() end
                 task.wait(0.4)
             else
                 local coin = findNearestCoin()
@@ -525,7 +547,6 @@ local function startFarm()
                         task.wait(0.05)
                     end
                 else
-                    -- Sem moeda visível: desancora para o auto-vote mover
                     local hrp = getHRP()
                     if hrp and hrp.Anchored then endFarmMovement() end
                     task.wait(0.3)
@@ -563,7 +584,6 @@ local function captureSource()
         if not src or #src < 100 then return false end
         getgenv().ASCRON_SOURCE = src
         if write then pcall(write, SOURCE_FILE, src) end
-        print("[ASCRON] Source: capturada (" .. #src .. " bytes)")
         return true
     end
     local ok1, info1 = pcall(function() if debug and debug.info then return debug.info(1, "s") end end)
@@ -603,26 +623,22 @@ end
 local function queueForReexecution()
     if not getgenv().ASCRON_SOURCE then captureSource() end
     if not getgenv().ASCRON_SOURCE then
-        warn("[ASCRON] Reexec: source NÃO capturada. Ative Auto-Execute no executor.")
+        warn("[ASCRON] Reexec: source não capturada.")
         return false
     end
     local write = type(writefile) == "function" and writefile or getgenv().writefile
     if write then pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE) end
     local loader = "pcall(function() local s = readfile('" .. SOURCE_FILE .. "'); if s and #s > 100 then loadstring(s)() end end)"
     if syn and syn.queue_on_teleport then
-        local ok = pcall(syn.queue_on_teleport, loader)
-        if ok then print("[ASCRON] Reexec: syn.queue_on_teleport"); return true end
+        if pcall(syn.queue_on_teleport, loader) then print("[ASCRON] Reexec: syn"); return true end
     end
     if type(queue_on_teleport) == "function" then
-        local ok = pcall(queue_on_teleport, loader)
-        if ok then print("[ASCRON] Reexec: queue_on_teleport"); return true end
+        if pcall(queue_on_teleport, loader) then print("[ASCRON] Reexec: global"); return true end
     end
     local g = getgenv()
     if g and type(g.queue_on_teleport) == "function" then
-        local ok = pcall(g.queue_on_teleport, loader)
-        if ok then print("[ASCRON] Reexec: getgenv().queue_on_teleport"); return true end
+        if pcall(g.queue_on_teleport, loader) then print("[ASCRON] Reexec: getgenv"); return true end
     end
-    warn("[ASCRON] Reexec: nenhum método de queue disponível.")
     return false
 end
 
@@ -645,9 +661,9 @@ end
 local function getServerPool()
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
     local raw = httpGet(url)
-    if not raw then print("[ASCRON] Hop: HTTP falhou"); return {} end
+    if not raw then return {} end
     local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
-    if not ok or not res or not res.data then print("[ASCRON] Hop: JSON inválido"); return {} end
+    if not ok or not res or not res.data then return {} end
     local pool = {}
     for _, s in ipairs(res.data) do
         if s.id ~= game.JobId and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then
@@ -668,13 +684,13 @@ local function tryTeleport(serverId)
         opts.ServerInstanceId = serverId
         return TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer, opts)
     end)
-    if not ok then conn:Disconnect(); return false, "erro: " .. tostring(result) end
+    if not ok then conn:Disconnect(); return false end
     if typeof(result) == "EnumItem" and result == Enum.TeleportState.Failed then
-        conn:Disconnect(); return false, "State=Failed"
+        conn:Disconnect(); return false
     end
     local start = tick()
     while tick() - start < 3 do
-        if failed then conn:Disconnect(); return false, "InitFailed: " .. tostring(failReason) end
+        if failed then conn:Disconnect(); return false end
         task.wait(0.1)
     end
     conn:Disconnect()
@@ -682,13 +698,11 @@ local function tryTeleport(serverId)
 end
 
 local function hop()
-    print("[ASCRON] === Hop iniciado ===")
     C.HopStatus = "buscando..."
     local pool = getServerPool()
     for i, srv in ipairs(pool) do
         C.HopStatus = "tentativa " .. i .. "/" .. #pool
-        local ok, reason = tryTeleport(srv.id)
-        if ok then
+        if tryTeleport(srv.id) then
             C.HopStatus = "OK"
             queueForReexecution()
             return true
@@ -829,10 +843,8 @@ local function stopAutoVote()
     if C.VoteThread then task.cancel(C.VoteThread); C.VoteThread = nil end
 end
 
--- ===================== ESP SYSTEM =====================
-local ESP = {
-    draws = {}, highlights = {}, coinHighlights = {}, gunHighlights = {},
-}
+-- ===================== ESP =====================
+local ESP = { draws = {}, highlights = {}, coinHighlights = {}, gunHighlights = {} }
 local ROLE_COLORS = {
     Murderer = Color3.fromRGB(255, 40, 40),
     Sheriff = Color3.fromRGB(40, 140, 255),
@@ -862,28 +874,23 @@ local function createPlayerDraws(player)
     if ESP.draws[player] then return ESP.draws[player] end
     if not DrawingAvailable then return nil end
     local draws = {}
-    local okB, box = pcall(function() return Drawing.new("Square") end)
-    if okB then box.Thickness = 1; box.Filled = false; box.Visible = false; draws.box = box end
-    local okN, name = pcall(function() return Drawing.new("Text") end)
-    if okN then name.Center = true; name.Outline = true; name.Size = 14; name.Font = 2; name.Visible = false; draws.name = name end
-    local okT, tracer = pcall(function() return Drawing.new("Line") end)
-    if okT then tracer.Thickness = 1; tracer.Visible = false; draws.tracer = tracer end
-    local okBg, hBg = pcall(function() return Drawing.new("Square") end)
-    if okBg then hBg.Filled = true; hBg.Color = Color3.fromRGB(0,0,0); hBg.Transparency = 0.7; hBg.Visible = false; draws.hBg = hBg end
-    local okF, hFill = pcall(function() return Drawing.new("Square") end)
-    if okF then hFill.Filled = true; hFill.Visible = false; draws.hFill = hFill end
+    pcall(function() local b = Drawing.new("Square"); b.Thickness=1; b.Filled=false; b.Visible=false; draws.box=b end)
+    pcall(function() local n = Drawing.new("Text"); n.Center=true; n.Outline=true; n.Size=14; n.Font=2; n.Visible=false; draws.name=n end)
+    pcall(function() local t = Drawing.new("Line"); t.Thickness=1; t.Visible=false; draws.tracer=t end)
+    pcall(function() local h = Drawing.new("Square"); h.Filled=true; h.Color=Color3.fromRGB(0,0,0); h.Transparency=0.7; h.Visible=false; draws.hBg=h end)
+    pcall(function() local f = Drawing.new("Square"); f.Filled=true; f.Visible=false; draws.hFill=f end)
     ESP.draws[player] = draws
     return draws
 end
-
-local function hideDraws(draws)
-    for _, d in pairs(draws) do pcall(function() d.Visible = false end) end
-end
+local function hideDraws(draws) for _, d in pairs(draws) do pcall(function() d.Visible = false end) end end
 
 local function updatePlayerESP()
     if not DrawingAvailable then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
+    if not (C.ESPEnabled or C.TracersEnabled) then
+        for _, draws in pairs(ESP.draws) do hideDraws(draws) end
+        return
+    end
+    local cam = workspace.CurrentCamera; if not cam then return end
     local data = getPlayerData()
     local function getRole(player)
         if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
@@ -915,19 +922,15 @@ local function updatePlayerESP()
             if draws.box then
                 draws.box.Position = Vector2.new(x, y)
                 draws.box.Size = Vector2.new(w, h)
-                draws.box.Color = color
-                draws.box.Visible = true
+                draws.box.Color = color; draws.box.Visible = true
             end
             if draws.name then
                 draws.name.Text = player.Name .. " [" .. role .. "]"
                 draws.name.Position = Vector2.new(headScreen.X, y - 18)
-                draws.name.Color = color
-                draws.name.Visible = true
+                draws.name.Color = color; draws.name.Visible = true
             end
             if draws.hBg then
-                draws.hBg.Position = Vector2.new(x - 6, y)
-                draws.hBg.Size = Vector2.new(3, h)
-                draws.hBg.Visible = true
+                draws.hBg.Position = Vector2.new(x - 6, y); draws.hBg.Size = Vector2.new(3, h); draws.hBg.Visible = true
             end
             if draws.hFill then
                 local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
@@ -945,8 +948,7 @@ local function updatePlayerESP()
         if C.TracersEnabled and draws.tracer then
             draws.tracer.From = Vector2.new(screenSize.X / 2, screenSize.Y)
             draws.tracer.To = Vector2.new(headScreen.X, headScreen.Y)
-            draws.tracer.Color = color
-            draws.tracer.Visible = true
+            draws.tracer.Color = color; draws.tracer.Visible = true
         elseif draws.tracer then
             draws.tracer.Visible = false
         end
@@ -961,11 +963,12 @@ local function updateHighlights()
         end
         return "Innocent"
     end
+    local active = C.ChamsEnabled or C.OutlinesEnabled
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
         local char = player.Character
         local hl = ESP.highlights[player]
-        if not char or not (C.ChamsEnabled or C.OutlinesEnabled) then
+        if not char or not active then
             if hl then pcall(function() hl:Destroy() end); ESP.highlights[player] = nil end
             continue
         end
@@ -982,8 +985,7 @@ local function updateHighlights()
             ESP.highlights[player] = hl
         end
         local color = getRoleColor(role)
-        hl.FillColor = color
-        hl.OutlineColor = color
+        hl.FillColor = color; hl.OutlineColor = color
         hl.FillTransparency = C.ChamsEnabled and 0.45 or 1
         hl.OutlineTransparency = C.OutlinesEnabled and 0 or 1
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -1014,15 +1016,14 @@ local function updateHighlights()
             end
         end
     else
-        for part, hl in pairs(ESP.coinHighlights) do pcall(function() hl:Destroy() end) end
+        for _, hl in pairs(ESP.coinHighlights) do pcall(function() hl:Destroy() end) end
         ESP.coinHighlights = {}
     end
     if C.ESPGun then
         local seen = {}
         for _, obj in ipairs(Workspace:GetDescendants()) do
             if obj:IsA("Model") and (obj.Name == "Gun" or obj.Name == "Revolver") then
-                local held = Players:GetPlayerFromCharacter(obj.Parent) ~= nil
-                if not held then
+                if not Players:GetPlayerFromCharacter(obj.Parent) then
                     seen[obj] = true
                     if not ESP.gunHighlights[obj] or ESP.gunHighlights[obj].Parent ~= obj then
                         if ESP.gunHighlights[obj] then pcall(function() ESP.gunHighlights[obj]:Destroy() end) end
@@ -1043,18 +1044,22 @@ local function updateHighlights()
             end
         end
     else
-        for obj, hl in pairs(ESP.gunHighlights) do pcall(function() hl:Destroy() end) end
+        for _, hl in pairs(ESP.gunHighlights) do pcall(function() hl:Destroy() end) end
         ESP.gunHighlights = {}
     end
 end
 
-local lastHLUpdate = 0
-RunService.RenderStepped:Connect(function()
+-- Throttled ESP loop (20 FPS player ESP, ~6 FPS highlights)
+local espAccum, hlAccum = 0, 0
+RunService.Heartbeat:Connect(function(dt)
     if not (C.ESPEnabled or C.TracersEnabled or C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
-    pcall(updatePlayerESP)
-    local now = tick()
-    if now - lastHLUpdate > 0.1 then
-        lastHLUpdate = now
+    espAccum += dt; hlAccum += dt
+    if espAccum >= 0.05 then
+        espAccum = 0
+        pcall(updatePlayerESP)
+    end
+    if hlAccum >= 0.15 then
+        hlAccum = 0
         pcall(updateHighlights)
     end
 end)
@@ -1064,10 +1069,7 @@ Players.PlayerRemoving:Connect(function(player)
         for _, d in pairs(ESP.draws[player]) do pcall(function() d:Remove() end) end
         ESP.draws[player] = nil
     end
-    if ESP.highlights[player] then
-        pcall(function() ESP.highlights[player]:Destroy() end)
-        ESP.highlights[player] = nil
-    end
+    if ESP.highlights[player] then pcall(function() ESP.highlights[player]:Destroy() end); ESP.highlights[player] = nil end
 end)
 
 -- ===================== GUI =====================
@@ -1083,7 +1085,7 @@ local function buildGui()
     local parent = getGuiParent()
     if not parent then warn("[ASCRON] Sem parent GUI."); return end
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v16"
+    gui.Name = "ASCRON_MM2_v17"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -1106,23 +1108,21 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v16"
+    titleLbl.Text = "ASCRON | MM2 v17"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold; titleLbl.TextSize = 13
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
     titleLbl.Parent = titleBar
 
     local minBtn = Instance.new("TextButton")
-    minBtn.Size = UDim2.new(0, 24, 0, 20)
-    minBtn.Position = UDim2.new(1, -56, 0, 4)
+    minBtn.Size = UDim2.new(0, 24, 0, 20); minBtn.Position = UDim2.new(1, -56, 0, 4)
     minBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
     minBtn.Text = "—"; minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     minBtn.Font = Enum.Font.GothamBold; minBtn.TextSize = 13
     minBtn.Parent = titleBar
 
     local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(0, 24, 0, 20)
-    closeBtn.Position = UDim2.new(1, -28, 0, 4)
+    closeBtn.Size = UDim2.new(0, 24, 0, 20); closeBtn.Position = UDim2.new(1, -28, 0, 4)
     closeBtn.BackgroundColor3 = Color3.fromRGB(120, 30, 30)
     closeBtn.Text = "X"; closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 13
@@ -1138,26 +1138,21 @@ local function buildGui()
         for _, hl in pairs(ESP.highlights) do pcall(function() hl:Destroy() end) end
         for _, hl in pairs(ESP.coinHighlights) do pcall(function() hl:Destroy() end) end
         for _, hl in pairs(ESP.gunHighlights) do pcall(function() hl:Destroy() end) end
-        for _, draws in pairs(ESP.draws) do
-            for _, d in pairs(draws) do pcall(function() d:Remove() end) end
-        end
+        for _, draws in pairs(ESP.draws) do for _, d in pairs(draws) do pcall(function() d:Remove() end) end end
         savePrefs()
         gui:Destroy()
     end)
 
     local tabBar = Instance.new("Frame")
-    tabBar.Size = UDim2.new(1, 0, 0, 26)
-    tabBar.Position = UDim2.new(0, 0, 0, 28)
+    tabBar.Size = UDim2.new(1, 0, 0, 26); tabBar.Position = UDim2.new(0, 0, 0, 28)
     tabBar.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
     tabBar.BorderSizePixel = 0; tabBar.Parent = main
     local tabLayout = Instance.new("UIListLayout")
     tabLayout.FillDirection = Enum.FillDirection.Horizontal
-    tabLayout.Padding = UDim.new(0, 0)
-    tabLayout.Parent = tabBar
+    tabLayout.Padding = UDim.new(0, 0); tabLayout.Parent = tabBar
 
     local content = Instance.new("Frame")
-    content.Size = UDim2.new(1, 0, 1, -54)
-    content.Position = UDim2.new(0, 0, 0, 54)
+    content.Size = UDim2.new(1, 0, 1, -54); content.Position = UDim2.new(0, 0, 0, 54)
     content.BackgroundTransparency = 1; content.Parent = main
 
     local tabs = {}
@@ -1178,8 +1173,8 @@ local function buildGui()
         list.Padding = UDim.new(0, 4); list.SortOrder = Enum.SortOrder.LayoutOrder
         list.Parent = frame
         local pad = Instance.new("UIPadding")
-        pad.PaddingTop = UDim.new(0, 8); pad.PaddingLeft = UDim.new(0, 8)
-        pad.PaddingRight = UDim.new(0, 8); pad.Parent = frame
+        pad.PaddingTop = UDim.new(0, 8); pad.PaddingLeft = UDim.new(0, 8); pad.PaddingRight = UDim.new(0, 8)
+        pad.Parent = frame
         tabs[name] = { btn = btn, frame = frame, list = list }
         list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
             frame.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 16)
@@ -1206,8 +1201,7 @@ local function buildGui()
 
     local function makeLabel(parent, text, order)
         local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, 0, 0, 16)
-        l.BackgroundTransparency = 1
+        l.Size = UDim2.new(1, 0, 0, 16); l.BackgroundTransparency = 1
         l.Text = text; l.TextColor3 = Color3.fromRGB(150, 150, 150)
         l.Font = Enum.Font.Gotham; l.TextSize = 10
         l.TextXAlignment = Enum.TextXAlignment.Left
@@ -1216,20 +1210,17 @@ local function buildGui()
     end
     local function makeToggle(parent, text, initial, order, cb)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 26)
-        row.BackgroundTransparency = 1; row.LayoutOrder = order; row.Parent = parent
+        row.Size = UDim2.new(1, 0, 0, 26); row.BackgroundTransparency = 1
+        row.LayoutOrder = order; row.Parent = parent
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -60, 1, 0)
-        lbl.BackgroundTransparency = 1
+        lbl.Size = UDim2.new(1, -60, 1, 0); lbl.BackgroundTransparency = 1
         lbl.Text = text; lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.Gotham; lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 48, 0, 20)
-        btn.Position = UDim2.new(1, -52, 0.5, -10)
+        btn.Size = UDim2.new(0, 48, 0, 20); btn.Position = UDim2.new(1, -52, 0.5, -10)
         btn.BackgroundColor3 = initial and Color3.fromRGB(0, 130, 0) or Color3.fromRGB(55, 55, 55)
-        btn.Text = initial and "ON" or "OFF"
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Text = initial and "ON" or "OFF"; btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Font = Enum.Font.GothamBold; btn.TextSize = 10
         btn.Parent = row
         local state = initial
@@ -1243,37 +1234,32 @@ local function buildGui()
     end
     local function makeInput(parent, labelText, value, order, cb)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 24)
-        row.BackgroundTransparency = 1; row.LayoutOrder = order; row.Parent = parent
+        row.Size = UDim2.new(1, 0, 0, 24); row.BackgroundTransparency = 1
+        row.LayoutOrder = order; row.Parent = parent
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -80, 1, 0)
-        lbl.BackgroundTransparency = 1
+        lbl.Size = UDim2.new(1, -80, 1, 0); lbl.BackgroundTransparency = 1
         lbl.Text = labelText; lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11
         lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
         local box = Instance.new("TextBox")
-        box.Size = UDim2.new(0, 72, 0, 20)
-        box.Position = UDim2.new(1, -76, 0.5, -10)
+        box.Size = UDim2.new(0, 72, 0, 20); box.Position = UDim2.new(1, -76, 0.5, -10)
         box.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-        box.TextColor3 = Color3.fromRGB(255, 255, 255)
-        box.Text = tostring(value)
+        box.TextColor3 = Color3.fromRGB(255, 255, 255); box.Text = tostring(value)
         box.Font = Enum.Font.Gotham; box.TextSize = 11
         box.Parent = row
         box.FocusLost:Connect(function() pcall(function() cb(box.Text) end); savePrefs() end)
     end
     local function makeCycle(parent, labelText, options, initialValue, order, cb)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 26)
-        row.BackgroundTransparency = 1; row.LayoutOrder = order; row.Parent = parent
+        row.Size = UDim2.new(1, 0, 0, 26); row.BackgroundTransparency = 1
+        row.LayoutOrder = order; row.Parent = parent
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -130, 1, 0)
-        lbl.BackgroundTransparency = 1
+        lbl.Size = UDim2.new(1, -130, 1, 0); lbl.BackgroundTransparency = 1
         lbl.Text = labelText; lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11
         lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = row
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 120, 0, 20)
-        btn.Position = UDim2.new(1, -124, 0.5, -10)
+        btn.Size = UDim2.new(0, 120, 0, 20); btn.Position = UDim2.new(1, -124, 0.5, -10)
         btn.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
         btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Font = Enum.Font.Gotham; btn.TextSize = 11
@@ -1288,23 +1274,17 @@ local function buildGui()
         end)
     end
 
-    -- MAIN
     local order = 0
     local function nextOrder() order += 1; return order end
-    makeToggle(mainTab, "AUTO FARM", C.Farming, nextOrder(), function(s)
-        if s then startFarm() else stopFarm() end
-    end)
+
+    makeToggle(mainTab, "AUTO FARM", C.Farming, nextOrder(), function(s) if s then startFarm() else stopFarm() end end)
     makeLabel(mainTab, "— Currency —", nextOrder())
     makeCycle(mainTab, "Target", {"Coin","Candy","SnowToken","Token","Shell"}, C.Currency, nextOrder(), function(o) C.Currency = o end)
     makeLabel(mainTab, "— Movement —", nextOrder())
-    makeInput(mainTab, "Speed (studs/s)", C.FarmSpeed, nextOrder(), function(v)
-        local n = tonumber(v); if n then C.FarmSpeed = math.clamp(n, 8, 60) end
-    end)
+    makeInput(mainTab, "Speed (studs/s)", C.FarmSpeed, nextOrder(), function(v) local n=tonumber(v); if n then C.FarmSpeed=math.clamp(n,8,60) end end)
     makeCycle(mainTab, "Mode", {"Standard","Lay"}, C.FarmMode, nextOrder(), function(o) C.FarmMode = o end)
     makeLabel(mainTab, "— Bag —", nextOrder())
-    makeInput(mainTab, "Threshold (0=auto)", C.BagThresholdOverride, nextOrder(), function(v)
-        local n = tonumber(v); if n then C.BagThresholdOverride = math.max(0, n) end
-    end)
+    makeInput(mainTab, "Threshold (0=auto)", C.BagThresholdOverride, nextOrder(), function(v) local n=tonumber(v); if n then C.BagThresholdOverride=math.max(0,n) end end)
     local statsLbl = Instance.new("TextLabel")
     statsLbl.Size = UDim2.new(1, 0, 0, 60)
     statsLbl.BackgroundColor3 = Color3.fromRGB(30, 28, 0)
@@ -1317,16 +1297,13 @@ local function buildGui()
         while statsLbl.Parent do
             task.wait(1)
             local bag = getStatValue()
-            statsLbl.Text = string.format(
-                "Collected: %d\nPer hour: %d\nBag: %s/%d\nFails: %d",
+            local round = isInActiveRound() and "IN-ROUND" or "LOBBY/DEAD"
+            statsLbl.Text = string.format("Collected: %d\nPer hour: %d\nBag: %s/%d\n%s | Fails: %d",
                 C.Stats.TotalCounted, getRatePerHour(),
-                bag ~= nil and tostring(bag) or "?",
-                getBagThreshold(), C.CollectFails
-            )
+                bag ~= nil and tostring(bag) or "?", getBagThreshold(), round, C.CollectFails)
         end
     end)
 
-    -- ACTIONS
     order = 0
     makeLabel(actionsTab, "— Innocent —", nextOrder())
     makeToggle(actionsTab, "Reset when full", C.AutoResetInnocent, nextOrder(), function(s) C.AutoResetInnocent = s end)
@@ -1340,18 +1317,14 @@ local function buildGui()
     makeToggle(actionsTab, "Reset after action", C.ResetAfterAction, nextOrder(), function(s) C.ResetAfterAction = s end)
     makeToggle(actionsTab, "Reset regardless of role", C.AutoResetAnyRole, nextOrder(), function(s) C.AutoResetAnyRole = s end)
 
-    -- PROTECT
     order = 0
     makeToggle(protectTab, "Anti-AFK", C.AntiAFK, nextOrder(), function(s) C.AntiAFK = s; if s then startAntiAFK() end end)
     makeToggle(protectTab, "Anti-Void", C.AntiVoid, nextOrder(), function(s) C.AntiVoid = s; setupAntiVoid() end)
     makeToggle(protectTab, "Anti-Fling", C.AntiFling, nextOrder(), function(s) C.AntiFling = s end)
     makeToggle(protectTab, "Anti-Murderer", C.AntiMurderer, nextOrder(), function(s) C.AntiMurderer = s end)
     makeToggle(protectTab, "Noclip", C.Noclip, nextOrder(), function(s) C.Noclip = s; if s then startNoclip() else stopNoclip() end end)
-    makeToggle(protectTab, "Disable 3D", C.Disable3D, nextOrder(), function(s)
-        C.Disable3D = s; pcall(function() RunService:Set3dRenderingEnabled(not s) end)
-    end)
+    makeToggle(protectTab, "Disable 3D", C.Disable3D, nextOrder(), function(s) C.Disable3D = s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
 
-    -- ESP
     order = 0
     makeLabel(espTab, "— Player ESP —", nextOrder())
     makeToggle(espTab, "Boxes + Names + Health", C.ESPEnabled, nextOrder(), function(s) C.ESPEnabled = s end)
@@ -1367,16 +1340,12 @@ local function buildGui()
     makeToggle(espTab, "Coin ESP", C.ESPCoin, nextOrder(), function(s) C.ESPCoin = s end)
     makeToggle(espTab, "Dropped Gun ESP", C.ESPGun, nextOrder(), function(s) C.ESPGun = s end)
 
-    -- SERVER
     order = 0
-    makeInput(serverTab, "Hop if players >", C.ServerHopPlayerCount, nextOrder(), function(v)
-        local n = tonumber(v); if n then C.ServerHopPlayerCount = n end
-    end)
+    makeInput(serverTab, "Hop if players >", C.ServerHopPlayerCount, nextOrder(), function(v) local n=tonumber(v); if n then C.ServerHopPlayerCount=n end end)
     makeToggle(serverTab, "Hop when friend joins", C.HopOnFriendJoin, nextOrder(), function(s) C.HopOnFriendJoin = s; if s then startFriendMonitor() end end)
     local hopStatusLbl = Instance.new("TextLabel")
     hopStatusLbl.Size = UDim2.new(1, 0, 0, 24)
-    hopStatusLbl.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
-    hopStatusLbl.BorderSizePixel = 0
+    hopStatusLbl.BackgroundColor3 = Color3.fromRGB(28, 28, 28); hopStatusLbl.BorderSizePixel = 0
     hopStatusLbl.TextColor3 = Color3.fromRGB(255, 220, 100)
     hopStatusLbl.Font = Enum.Font.Code; hopStatusLbl.TextSize = 10
     hopStatusLbl.Text = "Hop: idle"
@@ -1388,7 +1357,6 @@ local function buildGui()
         end
     end)
 
-    -- VOTE
     order = 0
     local voteOptions = {"OFF","Smallest Map","Largest Map","Random"}
     local voteMap = {OFF = 0, ["Smallest Map"] = 1, ["Largest Map"] = 2, Random = 3}
@@ -1397,9 +1365,7 @@ local function buildGui()
         C.AutoVoteMode = voteMap[o] or 0
         if C.AutoVoteMode ~= 0 then startAutoVote() else stopAutoVote() end
     end)
-    makeInput(voteTab, "Max votes (0=inf)", C.AutoVoteMax, nextOrder(), function(v)
-        local n = tonumber(v); if n then C.AutoVoteMax = math.max(0, n) end
-    end)
+    makeInput(voteTab, "Max votes (0=inf)", C.AutoVoteMax, nextOrder(), function(v) local n=tonumber(v); if n then C.AutoVoteMax=math.max(0,n) end end)
 
     tabs["Main"].btn.MouseButton1Click:Fire()
 end
@@ -1407,13 +1373,21 @@ end
 -- ===================== INIT =====================
 captureSource()
 
+-- Reset PD cache on respawn + death listener that immediately unanchors
 LocalPlayer.CharacterAdded:Connect(function(char)
-    task.wait(2)
+    pdCache.data = nil; pdCache.timestamp = 0
+    task.wait(0.5)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.Died:Connect(function()
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then pcall(function() hrp.Anchored = false end) end
+        end)
+    end
+    task.wait(1.5)
     if C.Farming then
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
-            local coin = findNearestCoin()
-            if coin then beginFarmMovement() end
+        if hum and hum.Health > 0 and isInActiveRound() then
+            if findNearestCoin() then beginFarmMovement() end
         end
     end
 end)
@@ -1430,10 +1404,4 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[ASCRON] v16 pronta.")
-print("[ASCRON] HWID: " .. HWID)
-if getgenv().ASCRON_SOURCE then
-    print("[ASCRON] Source: " .. #getgenv().ASCRON_SOURCE .. " bytes")
-else
-    warn("[ASCRON] Source não capturada — reexec via queue pode falhar.")
-end
+print("[ASCRON] v17 pronta.")
