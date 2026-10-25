@@ -1,5 +1,6 @@
--- ASCRON | MM2 AutoFarm v10
--- Fixes: toggle bug, GUI compacta, hop com retry, prefs por HWID
+-- ASCRON | MM2 AutoFarm v11
+-- Bag detection: leaderstats + attributes + GetPlayerData
+-- Reexecution: syn.queue_on_teleport → queue_on_teleport → getgenv() → loadstring fallback
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,9 +17,7 @@ local LocalPlayer = Players.LocalPlayer
 local function getHWID()
     local ok, id = pcall(function() return gethwid() end)
     if ok and type(id) == "string" and #id > 0 then return id end
-    local ok2, cid = pcall(function()
-        return game:GetService("RbxAnalyticsService"):GetClientId()
-    end)
+    local ok2, cid = pcall(function() return game:GetService("RbxAnalyticsService"):GetClientId() end)
     if ok2 and type(cid) == "string" and #cid > 0 then return cid end
     return tostring(LocalPlayer.UserId)
 end
@@ -50,7 +49,6 @@ end
 getgenv().ASCRON = getgenv().ASCRON or {}
 local C = getgenv().ASCRON
 
--- Defaults
 if C.Currency == nil then C.Currency = "Coin" end
 if C.FarmSpeed == nil then C.FarmSpeed = 22 end
 if C.FarmMode == nil then C.FarmMode = "Standard" end
@@ -71,7 +69,6 @@ if C.AutoKillMurderer == nil then C.AutoKillMurderer = true end
 if C.AutoResetMurderer == nil then C.AutoResetMurderer = false end
 if C.BagThresholdOverride == nil then C.BagThresholdOverride = 0 end
 
--- Load prefs
 local saved = Prefs.load()
 if saved then
     for k, v in pairs(saved) do
@@ -79,7 +76,6 @@ if saved then
     end
 end
 
--- Runtime-only (never loaded)
 C.Farming = false
 C.FarmThread = nil
 C.HopThread, C.FriendThread, C.VoteThread = nil, nil, nil
@@ -109,41 +105,68 @@ end
 local function getHRP() local c = LocalPlayer.Character; return c and c:FindFirstChild("HumanoidRootPart") end
 local function getHum() local c = LocalPlayer.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 
--- ===================== BAG THRESHOLD =====================
+-- ===================== BAG DETECTION (3 LAYERS) =====================
 local EVENT_CURRENCIES = {
     Candy = true, SnowToken = true, Token = true, Shell = true,
     Egg = true, Present = true, Gift = true, Gem = true,
 }
 local function getBagThreshold()
-    if C.BagThresholdOverride and C.BagThresholdOverride > 0 then
-        return C.BagThresholdOverride
-    end
+    if C.BagThresholdOverride and C.BagThresholdOverride > 0 then return C.BagThresholdOverride end
     if EVENT_CURRENCIES[C.Currency] then return 50 end
     return 40
 end
 
-local CURRENCY_FIELDS = {
-    Coin = {"Coins", "Coin"},
-    Candy = {"Candy"},
-    SnowToken = {"SnowToken", "Snow Tokens", "SnowTokens"},
+local CURRENCY_ALIASES = {
+    Coin = {"Coins", "Coin", "coin", "coins"},
+    Candy = {"Candy", "Candies", "candy", "candies"},
+    SnowToken = {"SnowToken", "SnowTokens", "Snow Tokens"},
     Token = {"Token", "Tokens"},
     Shell = {"Shell", "Shells"},
     Egg = {"Egg", "Eggs"},
     Present = {"Present", "Presents"},
     Gift = {"Gift", "Gifts"},
     Gem = {"Gem", "Gems"},
-    Cash = {"Cash"},
-    Money = {"Money"},
 }
-local function getStatValue()
+local function getStatFromLeaderstats()
     local ls = LocalPlayer:FindFirstChild("leaderstats")
     if not ls then return nil end
-    local fields = CURRENCY_FIELDS[C.Currency] or {C.Currency}
-    for _, field in ipairs(fields) do
-        local st = ls:FindFirstChild(field)
-        if st then return st.Value end
+    local aliases = CURRENCY_ALIASES[C.Currency] or {C.Currency}
+    for _, name in ipairs(aliases) do
+        local st = ls:FindFirstChild(name)
+        if st and typeof(st.Value) == "number" then return st.Value end
     end
     return nil
+end
+
+local function getStatFromAttributes()
+    local aliases = CURRENCY_ALIASES[C.Currency] or {C.Currency}
+    for _, name in ipairs(aliases) do
+        local ok, v = pcall(function() return LocalPlayer:GetAttribute(name) end)
+        if ok and type(v) == "number" then return v end
+    end
+    return nil
+end
+
+local function getStatFromPlayerData()
+    local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+    if not remote or not remote:IsA("RemoteFunction") then return nil end
+    local ok, data = pcall(function() return remote:InvokeServer() end)
+    if not ok or not data or not data[LocalPlayer.Name] then return nil end
+    local me = data[LocalPlayer.Name]
+    local aliases = CURRENCY_ALIASES[C.Currency] or {C.Currency}
+    for _, name in ipairs(aliases) do
+        if type(me[name]) == "number" then return me[name] end
+    end
+    if type(me.Bag) == "number" then return me.Bag end
+    if type(me.Coins) == "number" then return me.Coins end
+    if type(me.Candies) == "number" then return me.Candies end
+    return nil
+end
+
+local function getStatValue()
+    return getStatFromLeaderstats()
+        or getStatFromAttributes()
+        or getStatFromPlayerData()
 end
 
 -- ===================== NOCLIP =====================
@@ -155,9 +178,7 @@ local function startNoclip()
         local char = LocalPlayer.Character
         if not char then return end
         for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") and part.CanCollide then
-                part.CanCollide = false
-            end
+            if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
         end
     end)
 end
@@ -245,16 +266,13 @@ local function collect(coin)
     end)
 end
 
--- ===================== MOVIMENTO (smoothstep por frame) =====================
+-- ===================== MOVIMENTO =====================
 local LAY_ROTATION = CFrame.Angles(math.rad(90), 0, 0)
 local function smoothMove(targetPos, rotate90, speed)
     local hrp = getHRP(); if not hrp then return false end
     local startPos = hrp.Position
     local distance = (targetPos - startPos).Magnitude
-    if distance < 1.5 then
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        return true
-    end
+    if distance < 1.5 then hrp.AssemblyLinearVelocity = Vector3.zero; return true end
     speed = math.clamp(speed or C.FarmSpeed, 8, 45)
     local duration = math.max(0.25, distance / speed)
     local startTime = tick()
@@ -283,7 +301,6 @@ local function smoothMove(targetPos, rotate90, speed)
     return true
 end
 
--- ===================== MODO =====================
 local function applyMode()
     local hum = getHum(); if not hum then return end
     hum.PlatformStand = (C.FarmMode == "Lay" or C.FarmMode == "Safe")
@@ -296,7 +313,7 @@ local function resetMode()
     end
 end
 
--- ===================== PAPEL (detecção) =====================
+-- ===================== PAPEL =====================
 local function getPlayerData()
     local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
     if not remote or not remote:IsA("RemoteFunction") then return nil end
@@ -309,7 +326,6 @@ local function getMyRole()
         local r = data[LocalPlayer.Name].Role
         if r and r ~= "None" then return r end
     end
-    -- Fallback: detectar por tools (mochila + character)
     local containers = {LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")}
     for _, container in ipairs(containers) do
         if container then
@@ -336,17 +352,14 @@ local function findMurderer()
     return nil
 end
 
--- ===================== AÇÕES POR PAPEL =====================
+-- ===================== AÇÕES =====================
 local function equipTool(name)
     local ch = LocalPlayer.Character; if not ch then return nil end
     local tool = ch:FindFirstChild(name)
     if not tool then
         local bp = LocalPlayer:FindFirstChild("Backpack")
         tool = bp and bp:FindFirstChild(name)
-        if tool then
-            tool.Parent = ch
-            task.wait(0.25)
-        end
+        if tool then tool.Parent = ch; task.wait(0.25) end
     end
     return tool
 end
@@ -446,7 +459,7 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
--- ===================== FARM LOOP (TOGGLE FIX) =====================
+-- ===================== FARM LOOP =====================
 local function startFarm()
     if C.Farming then return end
     C.Farming = true
@@ -459,9 +472,7 @@ local function startFarm()
             if coin then
                 local targetPos = coin.Position
                 local rotate90 = (C.FarmMode == "Lay" or C.FarmMode == "Safe")
-                if C.FarmMode == "Safe" then
-                    targetPos = targetPos - Vector3.new(0, 20, 0)
-                end
+                if C.FarmMode == "Safe" then targetPos = targetPos - Vector3.new(0, 20, 0) end
                 smoothMove(targetPos, rotate90, C.FarmSpeed)
                 if coin.Parent then collect(coin) end
                 task.wait(0.12)
@@ -483,16 +494,70 @@ local function stopFarm()
     resetMode()
 end
 
--- ===================== SERVER HOP (retry) =====================
-local function captureSource()
-    if getgenv().ASCRON_SOURCE then return end
+-- ===================== REEXECUTION (Delta / Arceus X) =====================
+local function getScriptSource()
+    if getgenv().ASCRON_SOURCE then return getgenv().ASCRON_SOURCE end
     local ok, info = pcall(function() return debug.getinfo(1, "S") end)
-    if ok and info and info.source then getgenv().ASCRON_SOURCE = info.source; return end
+    if ok and info and info.source then
+        getgenv().ASCRON_SOURCE = info.source
+        return info.source
+    end
     local ok2, bc = pcall(function() if getscriptbytecode then return getscriptbytecode() end end)
-    if ok2 and bc then getgenv().ASCRON_SOURCE = bc end
+    if ok2 and bc then
+        getgenv().ASCRON_SOURCE = bc
+        return bc
+    end
+    return nil
 end
-captureSource()
 
+local function queueForReexecution(source)
+    if not source then return false end
+
+    -- 1. syn.queue_on_teleport
+    local ok1 = pcall(function()
+        if syn and syn.queue_on_teleport then syn.queue_on_teleport(source) end
+    end)
+    if ok1 then return true end
+
+    -- 2. queue_on_teleport global
+    local ok2 = pcall(function()
+        if queue_on_teleport then queue_on_teleport(source) end
+    end)
+    if ok2 then return true end
+
+    -- 3. getgenv().queue_on_teleport
+    local ok3 = pcall(function()
+        local g = getgenv()
+        if g and g.queue_on_teleport then g.queue_on_teleport(source) end
+    end)
+    if ok3 then return true end
+
+    -- 4. Fallback: salva em arquivo e reexecuta no próximo carregamento
+    local ok4 = pcall(function()
+        local write = type(writefile) == "function" and writefile or getgenv().writefile
+        if write then
+            write("ASCRON_MM2_REEXEC.lua", source)
+            getgenv().ASCRON_REEXEC_PENDING = true
+        end
+    end)
+    if ok4 then return true end
+
+    return false
+end
+
+local function checkPendingReexecution()
+    if not getgenv().ASCRON_REEXEC_PENDING then return end
+    getgenv().ASCRON_REEXEC_PENDING = nil
+    local ok, data = pcall(function()
+        local read = type(readfile) == "function" and readfile or getgenv().readfile
+        if read then return read("ASCRON_MM2_REEXEC.lua") end
+    end)
+    if ok and data then
+        pcall(function() loadstring(data)() end)
+    end
+end
+
+-- ===================== HOP (retry + reexecution) =====================
 local function getServerPool()
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
     local ok, res = pcall(function() return HttpService:JSONDecode(game:HttpGet(url)) end)
@@ -503,7 +568,6 @@ local function getServerPool()
             table.insert(pool, s)
         end
     end
-    -- Fisher-Yates shuffle
     for i = #pool, 2, -1 do
         local j = math.random(1, i)
         pool[i], pool[j] = pool[j], pool[i]
@@ -516,11 +580,7 @@ local function tryTeleportOnce()
     if #pool == 0 then return false end
     local failed = false
     local failConn = TeleportService.TeleportInitFailed:Connect(function() failed = true end)
-    local src = getgenv().ASCRON_SOURCE
-    if src then
-        pcall(function() syn.queue_on_teleport(src) end)
-        pcall(function() queue_on_teleport(src) end)
-    end
+    local source = getScriptSource()
     for _, srv in ipairs(pool) do
         local opts = Instance.new("TeleportOptions")
         opts.ServerInstanceId = srv.id
@@ -535,6 +595,7 @@ local function tryTeleportOnce()
         end
         if not failed then
             failConn:Disconnect()
+            if source then queueForReexecution(source) end
             return true
         end
     end
@@ -583,10 +644,7 @@ end
 -- ===================== AUTO-VOTE =====================
 local VOTE_PADS = {"VotePad1", "VotePad2", "VotePad3"}
 local MAP_ORDER = {"Manor","House 2","Office 3","Hospital 3","Bank 2","Vampire's Castle","Mansion 2","WorkPlace","Hotel 2","Farm House","Police Station","Factory","Bio Lab","Research Facility","Mil Base"}
-local function normalizeMapName(s)
-    s = string.lower(s):gsub("-", " "):gsub("%s+", " ")
-    return s:match("^%s*(.-)%s*$")
-end
+local function normalizeMapName(s) s = string.lower(s):gsub("-", " "):gsub("%s+", " "); return s:match("^%s*(.-)%s*$") end
 local mapRankCache = {}
 local function getMapRank(raw)
     if mapRankCache[raw] then return mapRankCache[raw] end
@@ -669,28 +727,21 @@ local function stopAutoVote()
     if C.VoteThread then task.cancel(C.VoteThread); C.VoteThread = nil end
 end
 
--- ===================== GUI (compacta) =====================
+-- ===================== GUI =====================
 local function getGuiParent()
     do local ok, r = pcall(function() return gethui() end); if ok and r then return r end end
     do local ok, r = pcall(function() return game:GetService("CoreGui") end); if ok and r then return r end end
     do local ok, r = pcall(function() return LocalPlayer:WaitForChild("PlayerGui", 5) end); if ok and r then return r end end
     return nil
 end
-
-local function findIndex(tbl, value)
-    for i, v in ipairs(tbl) do if v == value then return i end end
-    return 1
-end
+local function findIndex(tbl, value) for i, v in ipairs(tbl) do if v == value then return i end end; return 1 end
 
 local function buildGui()
     local parent = getGuiParent()
-    if not parent then
-        warn("[ASCRON] Nenhum parent de GUI disponível.")
-        return
-    end
+    if not parent then warn("[ASCRON] Nenhum parent de GUI disponível."); return end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v10"
+    gui.Name = "ASCRON_MM2_v11"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -716,7 +767,7 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v10"
+    titleLbl.Text = "ASCRON | MM2 v11"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold
     titleLbl.TextSize = 13
@@ -749,10 +800,7 @@ local function buildGui()
         main.Size = collapsed and UDim2.new(0, 360, 0, 28) or UDim2.new(0, 360, 0, 440)
         minBtn.Text = collapsed and "+" or "—"
     end)
-    closeBtn.MouseButton1Click:Connect(function()
-        savePrefs()
-        gui:Destroy()
-    end)
+    closeBtn.MouseButton1Click:Connect(function() savePrefs(); gui:Destroy() end)
 
     local tabBar = Instance.new("Frame")
     tabBar.Size = UDim2.new(1, 0, 0, 26)
@@ -760,7 +808,6 @@ local function buildGui()
     tabBar.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
     tabBar.BorderSizePixel = 0
     tabBar.Parent = main
-
     local tabLayout = Instance.new("UIListLayout")
     tabLayout.FillDirection = Enum.FillDirection.Horizontal
     tabLayout.Padding = UDim.new(0, 0)
@@ -803,11 +850,9 @@ local function buildGui()
         pad.Parent = frame
 
         tabs[name] = { btn = btn, frame = frame, list = list }
-
         list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
             frame.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 16)
         end)
-
         btn.MouseButton1Click:Connect(function()
             for _, t in pairs(tabs) do
                 t.frame.Visible = false
@@ -847,7 +892,6 @@ local function buildGui()
         row.BackgroundTransparency = 1
         row.LayoutOrder = order
         row.Parent = parent
-
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -60, 1, 0)
         lbl.BackgroundTransparency = 1
@@ -857,7 +901,6 @@ local function buildGui()
         lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
-
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(0, 48, 0, 20)
         btn.Position = UDim2.new(1, -52, 0.5, -10)
@@ -867,7 +910,6 @@ local function buildGui()
         btn.Font = Enum.Font.GothamBold
         btn.TextSize = 10
         btn.Parent = row
-
         local state = initial
         btn.MouseButton1Click:Connect(function()
             state = not state
@@ -885,7 +927,6 @@ local function buildGui()
         row.BackgroundTransparency = 1
         row.LayoutOrder = order
         row.Parent = parent
-
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -80, 1, 0)
         lbl.BackgroundTransparency = 1
@@ -895,7 +936,6 @@ local function buildGui()
         lbl.TextSize = 11
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
-
         local box = Instance.new("TextBox")
         box.Size = UDim2.new(0, 72, 0, 20)
         box.Position = UDim2.new(1, -76, 0.5, -10)
@@ -915,7 +955,6 @@ local function buildGui()
         row.BackgroundTransparency = 1
         row.LayoutOrder = order
         row.Parent = parent
-
         local lbl = Instance.new("TextLabel")
         lbl.Size = UDim2.new(1, -130, 1, 0)
         lbl.BackgroundTransparency = 1
@@ -925,7 +964,6 @@ local function buildGui()
         lbl.TextSize = 11
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
-
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(0, 120, 0, 20)
         btn.Position = UDim2.new(1, -124, 0.5, -10)
@@ -934,7 +972,6 @@ local function buildGui()
         btn.Font = Enum.Font.Gotham
         btn.TextSize = 11
         btn.Parent = row
-
         local idx = findIndex(options, initialValue)
         btn.Text = options[idx]
         btn.MouseButton1Click:Connect(function()
@@ -946,7 +983,6 @@ local function buildGui()
         return row
     end
 
-    -- ===== MAIN TAB =====
     local order = 0
     local function nextOrder() order += 1; return order end
 
@@ -978,15 +1014,16 @@ local function buildGui()
     task.spawn(function()
         while statsLbl.Parent do
             task.wait(1)
+            local bag = getStatValue()
             statsLbl.Text = string.format(
                 "Collected: %d\nPer hour: %d\nBag: %s/%d",
                 C.Stats.TotalCounted, getRatePerHour(),
-                tostring(getStatValue() or 0), getBagThreshold()
+                bag ~= nil and tostring(bag) or "?",
+                getBagThreshold()
             )
         end
     end)
 
-    -- ===== ACTIONS TAB =====
     order = 0
     makeLabel(actionsTab, "— Innocent —", nextOrder())
     makeToggle(actionsTab, "Reset when bag full", C.AutoResetInnocent, nextOrder(), function(s) C.AutoResetInnocent = s end)
@@ -999,33 +1036,22 @@ local function buildGui()
     makeLabel(actionsTab, "— Universal —", nextOrder())
     makeToggle(actionsTab, "Reset regardless of role", C.AutoResetAnyRole, nextOrder(), function(s) C.AutoResetAnyRole = s end)
 
-    -- ===== PROTECTION TAB =====
     order = 0
-    makeToggle(protectTab, "Anti-AFK", C.AntiAFK, nextOrder(), function(s)
-        C.AntiAFK = s; if s then startAntiAFK() end
-    end)
-    makeToggle(protectTab, "Anti-Void", C.AntiVoid, nextOrder(), function(s)
-        C.AntiVoid = s; setupAntiVoid()
-    end)
+    makeToggle(protectTab, "Anti-AFK", C.AntiAFK, nextOrder(), function(s) C.AntiAFK = s; if s then startAntiAFK() end end)
+    makeToggle(protectTab, "Anti-Void", C.AntiVoid, nextOrder(), function(s) C.AntiVoid = s; setupAntiVoid() end)
     makeToggle(protectTab, "Anti-Fling", C.AntiFling, nextOrder(), function(s) C.AntiFling = s end)
-    makeToggle(protectTab, "Noclip", C.Noclip, nextOrder(), function(s)
-        C.Noclip = s; if s then startNoclip() else stopNoclip() end
-    end)
+    makeToggle(protectTab, "Noclip", C.Noclip, nextOrder(), function(s) C.Noclip = s; if s then startNoclip() else stopNoclip() end end)
     makeToggle(protectTab, "Disable 3D rendering", C.Disable3D, nextOrder(), function(s)
         C.Disable3D = s
         pcall(function() RunService:Set3dRenderingEnabled(not s) end)
     end)
 
-    -- ===== SERVER TAB =====
     order = 0
     makeInput(serverTab, "Hop if players >", C.ServerHopPlayerCount, nextOrder(), function(v)
         local n = tonumber(v); if n then C.ServerHopPlayerCount = n end
     end)
-    makeToggle(serverTab, "Hop when friend joins", C.HopOnFriendJoin, nextOrder(), function(s)
-        C.HopOnFriendJoin = s; if s then startFriendMonitor() end
-    end)
+    makeToggle(serverTab, "Hop when friend joins", C.HopOnFriendJoin, nextOrder(), function(s) C.HopOnFriendJoin = s; if s then startFriendMonitor() end end)
 
-    -- ===== VOTE TAB =====
     order = 0
     local voteOptions = {"OFF","Smallest Map","Largest Map","Random"}
     local voteMap = {OFF = 0, ["Smallest Map"] = 1, ["Largest Map"] = 2, Random = 3}
@@ -1043,6 +1069,7 @@ local function buildGui()
 end
 
 -- ===================== INIT =====================
+checkPendingReexecution()
 startStatsTracker()
 if C.AntiAFK then startAntiAFK() end
 if C.AntiVoid then setupAntiVoid() end
@@ -1053,4 +1080,4 @@ if C.HopOnFriendJoin then startFriendMonitor() end
 if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end) end
 
 buildGui()
-print("[ASCRON] v10 pronta. Prefs: " .. PREFS_FILE)
+print("[ASCRON] v11 pronta. Bag detection: leaderstats + attributes + GetPlayerData.")
