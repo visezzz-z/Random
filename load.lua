@@ -1,7 +1,7 @@
--- ASCRON | MM2 AutoFarm v19
--- Fix: isInActiveRound barato | Position-jump unanchor | Transition-based watcher
+-- ASCRON | MM2 AutoFarm v20
+-- Fix: reset-strict on round end | Tracer player→player @60fps | Queue before teleport
 
-print("[ASCRON] === v19 loading ===")
+print("[ASCRON] === v20 loading ===")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -73,6 +73,7 @@ C.FarmStatus = "idle"
 C.FarmThread = nil
 C.HopThread, C.FriendThread, C.VoteThread, C.AntiMurdererThread = nil, nil, nil, nil
 C.LastFullAction = 0
+C.PostRoundCooldown = 0
 C.Stats = { TotalCounted = 0, SessionStart = tick(), LastSeenValue = nil }
 C.HopStatus = ""
 C.CollectFails = 0
@@ -91,7 +92,7 @@ local function getHum() local c = LocalPlayer.Character; return c and c:FindFirs
 local pdCache = { data = nil, timestamp = 0 }
 local function getPlayerData()
     local now = tick()
-    if pdCache.data and now - pdCache.timestamp < 0.5 then return pdCache.data end
+    if pdCache.data and now - pdCache.timestamp < 0.3 then return pdCache.data end
     local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
     if not remote or not remote:IsA("RemoteFunction") then return nil end
     local ok, data = pcall(function() return remote:InvokeServer() end)
@@ -99,7 +100,6 @@ local function getPlayerData()
     return pdCache.data
 end
 
--- ===================== ROUND STATE (barato, sem container scan) =====================
 local function isInActiveRound()
     local data = getPlayerData()
     if not data then return true end
@@ -110,12 +110,32 @@ local function isInActiveRound()
     return true
 end
 
-local function unanchorIfNeeded()
+-- Desancora + cancela PlatformStand. Não reseta o personagem.
+local function cleanupMovement()
     local hrp = getHRP()
-    if hrp and hrp.Anchored then
+    if hrp then
         pcall(function() hrp.Anchored = false end)
-        local hum = getHum()
-        if hum then hum.PlatformStand = false; hum.AutoRotate = true end
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+    local hum = getHum()
+    if hum then
+        hum.PlatformStand = false
+        hum.AutoRotate = true
+    end
+end
+
+-- Reset forçado. Unanchor primeiro, senão Health = 0 não dispara respawn.
+local function forceReset()
+    local hrp = getHRP()
+    if hrp then pcall(function() hrp.Anchored = false end) end
+    local hum = getHum()
+    if hum then
+        hum.PlatformStand = false
+        hum.AutoRotate = true
+        if hum.Health > 0 then hum.Health = 0 end
     end
 end
 
@@ -362,21 +382,16 @@ local function travelTo(targetPos, rotate90, speed, coinRef)
     local previousPos = hrp.Position
 
     while C.Farming do
+        if tick() - startTime > maxTravelTime then return false end
+        if not isInActiveRound() then return false end
         local h = getHRP()
         if not h or not h.Anchored then return false end
         if coinRef and not coinRef.Parent then return false end
         local curHum = getHum()
         if not curHum or curHum.Health <= 0 then return false end
-        if tick() - startTime > maxTravelTime then return false end
-
-        -- Detecta teleporte externo: se entre frames a posição mudou muito além
-        -- do que conseguimos mover (speed * dt max ~3 studs), o servidor nos moveu
-        -- (fim de rodada, kick para lobby). Aborta imediatamente.
         local currentPos = h.Position
-        if (currentPos - previousPos).Magnitude > 15 then
-            return false
-        end
-
+        if (currentPos - previousPos).Magnitude > 15 then return false end
+        if currentPos.Y < -100 or currentPos.Y > 10000 then return false end
         local delta = targetPos - h.Position
         local dist = delta.Magnitude
         if dist < 2.5 then
@@ -402,16 +417,6 @@ local function beginFarmMovement()
         hrp.Anchored = true
         hrp.AssemblyLinearVelocity = Vector3.zero
         hrp.AssemblyAngularVelocity = Vector3.zero
-    end
-end
-
-local function endFarmMovement()
-    local hrp = getHRP(); local hum = getHum()
-    if hrp then pcall(function() hrp.Anchored = false end) end
-    if hum then
-        hum.PlatformStand = false
-        hum.AutoRotate = true
-        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
     end
 end
 
@@ -498,27 +503,25 @@ local function flingMurderer()
     bg.CFrame = CFrame.new(0, math.huge, 0); bg.Parent = mHrp
     Debris:AddItem(bv, 0.6); Debris:AddItem(bg, 0.6)
 end
-local function resetCharacter()
-    local hrp = getHRP()
-    if hrp then pcall(function() hrp.Anchored = false end) end
-    local hum = getHum()
-    if hum then hum.PlatformStand = false; hum.Health = 0 end
-end
 
 local function handleFullBag()
     local role = getMyRole()
     local didAction = false
     if role == "Innocent" then
         if C.AutoFlingMurderer then flingMurderer(); didAction = true end
-        if C.AutoResetInnocent and not didAction then resetCharacter(); return end
+        if C.AutoResetInnocent and not didAction then forceReset(); return end
     elseif role == "Sheriff" then
         if C.AutoShootSheriff then shootMurderer(); didAction = true end
     elseif role == "Murderer" then
         if C.AutoKillMurderer then killAll(); didAction = true end
-        if C.AutoResetMurderer and not didAction then resetCharacter(); return end
+        if C.AutoResetMurderer and not didAction then forceReset(); return end
     end
-    if didAction and C.ResetAfterAction then task.wait(1.2); resetCharacter(); return end
-    if C.AutoResetAnyRole then resetCharacter() end
+    if didAction and C.ResetAfterAction then
+        task.wait(1.2)
+        forceReset()
+        return
+    end
+    if C.AutoResetAnyRole then forceReset() end
 end
 
 -- ===================== STATS =====================
@@ -544,6 +547,58 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
+-- ===================== ROUND TRANSITION WATCHER =====================
+-- Detecta transição de round por três sinais: estado de GetPlayerData,
+-- salto de posição do HRP ancorado (servidor nos moveu), e Y < -100.
+-- Em qualquer um, faz reset forçado e coloca cooldown de 3s.
+task.spawn(function()
+    local lastChar = nil
+    local lastPos = nil
+    local wasInRound = false
+    while true do
+        task.wait(0.1)
+        local currentChar = LocalPlayer.Character
+        if currentChar ~= lastChar then
+            lastChar = currentChar
+            lastPos = nil
+            wasInRound = false
+        end
+        local hrp = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
+
+        if C.Farming and hrp then
+            -- Sinal 1: salto de posição (servidor moveu HRP ancorado)
+            if hrp.Anchored and lastPos then
+                local jump = (hrp.Position - lastPos).Magnitude
+                if jump > 50 then
+                    C.FarmStatus = "round teleport detected"
+                    forceReset()
+                    C.PostRoundCooldown = tick() + 3
+                end
+            end
+            lastPos = hrp.Position
+
+            -- Sinal 2: transição de round via GetPlayerData
+            local nowInRound = isInActiveRound()
+            if wasInRound and not nowInRound then
+                C.FarmStatus = "round ended"
+                forceReset()
+                C.PostRoundCooldown = tick() + 3
+            end
+            wasInRound = nowInRound
+
+            -- Sinal 3: caiu do mapa (Y < -100)
+            if hrp.Position.Y < -100 then
+                C.FarmStatus = "fell - recovering"
+                forceReset()
+                C.PostRoundCooldown = tick() + 3
+            end
+        else
+            wasInRound = false
+            lastPos = nil
+        end
+    end
+end)
+
 -- ===================== FARM LOOP =====================
 local function startFarm()
     if C.Farming then return end
@@ -551,51 +606,61 @@ local function startFarm()
     C.FarmStatus = "starting"
     C.FarmThread = task.spawn(function()
         while C.Farming do
+            -- Cooldown pós-round: nada de ancorar, nada de mover
+            if tick() < C.PostRoundCooldown then
+                C.FarmStatus = "post-round cooldown"
+                cleanupMovement()
+                task.wait(0.2)
+                continue
+            end
+
             local hum = getHum()
-            if not hum or hum.Health <= 0 then
-                C.FarmStatus = "dead"
-                unanchorIfNeeded()
-                task.wait(0.4)
-            elseif not isInActiveRound() then
-                C.FarmStatus = "waiting for round"
-                unanchorIfNeeded()
-                task.wait(0.4)
-            else
-                local coin = findNearestCoin()
-                if coin then
-                    local hrp = getHRP()
-                    if hrp then
-                        if not hrp.Anchored then beginFarmMovement(); task.wait(0.1) end
-                        C.FarmStatus = "traveling"
-                        local rotate90 = (C.FarmMode == "Lay")
-                        local arrived = travelTo(coin.Position, rotate90, C.FarmSpeed, coin)
-                        if arrived and coin.Parent then
-                            C.FarmStatus = "collecting"
-                            collect(coin)
-                            local t = tick()
-                            while coin.Parent and tick() - t < 0.5 do task.wait(0.02) end
-                            if coin.Parent then C.CollectFails += 1 else C.CollectFails = 0 end
-                        elseif not coin.Parent then
-                            C.FarmStatus = "coin vanished"
-                        elseif not isInActiveRound() then
-                            C.FarmStatus = "round ended"
-                            unanchorIfNeeded()
-                        else
-                            C.FarmStatus = "travel aborted"
-                        end
-                        task.wait(0.05)
-                    end
+            local hrp = getHRP()
+
+            if not hum or hum.Health <= 0 or not hrp then
+                C.FarmStatus = "no character"
+                task.wait(0.3)
+                continue
+            end
+
+            if not isInActiveRound() then
+                C.FarmStatus = "lobby"
+                cleanupMovement()
+                task.wait(0.3)
+                continue
+            end
+
+            local coin = findNearestCoin()
+            if coin then
+                if not hrp.Anchored then beginFarmMovement(); task.wait(0.05) end
+                C.FarmStatus = "traveling"
+                local rotate90 = (C.FarmMode == "Lay")
+                local arrived = travelTo(coin.Position, rotate90, C.FarmSpeed, coin)
+                if arrived and coin.Parent then
+                    C.FarmStatus = "collecting"
+                    collect(coin)
+                    local t = tick()
+                    while coin.Parent and tick() - t < 0.5 do task.wait(0.02) end
+                    if coin.Parent then C.CollectFails += 1 else C.CollectFails = 0 end
+                elseif not isInActiveRound() then
+                    C.FarmStatus = "round ended mid-travel"
+                    forceReset()
+                    C.PostRoundCooldown = tick() + 3
                 else
-                    C.FarmStatus = "no coins"
-                    unanchorIfNeeded()
-                    task.wait(0.3)
+                    C.FarmStatus = "travel aborted"
                 end
-                local st = getStatValue()
-                if st and st >= getBagThreshold() and tick() - C.LastFullAction > 3 then
-                    C.LastFullAction = tick()
-                    C.FarmStatus = "bag full action"
-                    handleFullBag()
-                end
+                task.wait(0.05)
+            else
+                C.FarmStatus = "no coins - waiting"
+                cleanupMovement()
+                task.wait(0.3)
+            end
+
+            local st = getStatValue()
+            if st and st >= getBagThreshold() and tick() - C.LastFullAction > 3 then
+                C.LastFullAction = tick()
+                C.FarmStatus = "bag full action"
+                handleFullBag()
             end
         end
         C.FarmStatus = "idle"
@@ -605,35 +670,8 @@ local function stopFarm()
     C.Farming = false
     C.FarmStatus = "idle"
     if C.FarmThread then task.cancel(C.FarmThread); C.FarmThread = nil end
-    endFarmMovement()
+    cleanupMovement()
 end
-
--- ===================== ROUND END WATCHER (transição) =====================
-task.spawn(function()
-    local wasInRound = false
-    local notInRoundCount = 0
-    while true do
-        task.wait(0.15)
-        if not C.Farming then
-            wasInRound = false
-            notInRoundCount = 0
-        else
-            local nowInRound = isInActiveRound()
-            if nowInRound then
-                wasInRound = true
-                notInRoundCount = 0
-            elseif wasInRound then
-                notInRoundCount += 1
-                if notInRoundCount >= 2 then
-                    -- Confirmado duas vezes: rodada acabou
-                    unanchorIfNeeded()
-                    wasInRound = false
-                    notInRoundCount = 0
-                end
-            end
-        end
-    end
-end)
 
 -- ===================== SOURCE + REEXEC =====================
 local function captureSource()
@@ -697,23 +735,30 @@ local function queueForReexecution()
     end
     local write = type(writefile) == "function" and writefile or getgenv().writefile
     if write then pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE) end
-    local loader = "pcall(function() local s = readfile('" .. SOURCE_FILE .. "'); if s and #s > 100 then loadstring(s)() end end)"
+    -- Loader minimalista: sem escapes, sem funções exóticas. Compila em qualquer executor.
+    local loader = "loadstring(readfile('ASCRON_MM2_SOURCE.lua'))()"
+
     if syn and type(syn.queue_on_teleport) == "function" then
         if pcall(syn.queue_on_teleport, loader) then print("[ASCRON] Reexec: syn"); return true end
         if pcall(syn.queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: syn(full)"); return true end
     end
     if type(queue_on_teleport) == "function" then
-        if pcall(queue_on_teleport, loader) then print("[ASCRON] Reexec: global"); return true end
-        if pcall(queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: global(full)"); return true end
+        if pcall(queue_on_teleport, loader) then print("[ASCRON] Reexec: queue_on_teleport"); return true end
+        if pcall(queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: queue_on_teleport(full)"); return true end
     end
     local g = getgenv()
     if g and type(g.queue_on_teleport) == "function" then
-        if pcall(g.queue_on_teleport, loader) then print("[ASCRON] Reexec: getgenv"); return true end
+        if pcall(g.queue_on_teleport, loader) then print("[ASCRON] Reexec: getgenv().queue_on_teleport"); return true end
     end
     if type(queueonteleport) == "function" then
         if pcall(queueonteleport, loader) then print("[ASCRON] Reexec: queueonteleport"); return true end
     end
-    warn("[ASCRON] Reexec: nenhum método disponível. Ative Auto-Execute para " .. SOURCE_FILE)
+    -- Clipboard fallback
+    pcall(function()
+        if type(setclipboard) == "function" then setclipboard(getgenv().ASCRON_SOURCE) end
+    end)
+    warn("[ASCRON] Reexec indisponível. Source salva em " .. SOURCE_FILE)
+    warn("[ASCRON] Ative Auto-Execute no executor, OU cole do clipboard após teleporte.")
     return false
 end
 
@@ -732,7 +777,7 @@ local function httpGet(url)
     return nil
 end
 
--- ===================== HOP =====================
+-- ===================== HOP (queue ANTES do teleporte) =====================
 local function getServerPool()
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
     local raw = httpGet(url)
@@ -773,13 +818,28 @@ local function tryTeleport(serverId)
 end
 
 local function hop()
+    -- 1. Salva source em arquivo (garante persistência entre servidores)
+    if not getgenv().ASCRON_SOURCE then captureSource() end
+    local write = type(writefile) == "function" and writefile or getgenv().writefile
+    if write and getgenv().ASCRON_SOURCE then
+        pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE)
+    end
+
+    -- 2. Enfileira ANTES do teleporte (obrigatório para queue_on_teleport funcionar)
+    C.HopStatus = "queueing reexec"
+    local queued = queueForReexecution()
+
+    -- 3. Busca servidores e teleporta
     C.HopStatus = "buscando..."
     local pool = getServerPool()
+    if #pool == 0 then
+        C.HopStatus = "sem servidores"
+        return false
+    end
     for i, srv in ipairs(pool) do
         C.HopStatus = "tentativa " .. i .. "/" .. #pool
         if tryTeleport(srv.id) then
-            C.HopStatus = "OK"
-            queueForReexecution()
+            C.HopStatus = "OK" .. (queued and "" or " (sem reexec)")
             return true
         end
         task.wait(0.3)
@@ -791,8 +851,7 @@ local function hop()
     task.wait(3)
     conn:Disconnect()
     if not failed then
-        C.HopStatus = "fallback OK"
-        queueForReexecution()
+        C.HopStatus = "fallback OK" .. (queued and "" or " (sem reexec)")
         return true
     end
     C.HopStatus = "FALHOU"
@@ -959,22 +1018,40 @@ local function createPlayerDraws(player)
 end
 local function hideDraws(draws) for _, d in pairs(draws) do pcall(function() d.Visible = false end) end end
 
-local function updatePlayerESP()
+-- Cache do papel por jogador para evitar GetPlayerData calls repetidos
+local roleSnapshot = { data = nil, timestamp = 0 }
+local function getRoleSnapshot()
+    local now = tick()
+    if roleSnapshot.data and now - roleSnapshot.timestamp < 0.3 then return roleSnapshot.data end
+    local data = getPlayerData()
+    roleSnapshot.data = data
+    roleSnapshot.timestamp = now
+    return data
+end
+
+-- Tracers e boxes em um único passe, chamado em RenderStepped (60 FPS)
+local function updateDrawings()
     if not DrawingAvailable then return end
     if not (C.ESPEnabled or C.TracersEnabled) then
         for _, draws in pairs(ESP.draws) do hideDraws(draws) end
         return
     end
     local cam = workspace.CurrentCamera; if not cam then return end
-    local data = getPlayerData()
-    local function getRole(player)
-        if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
-            return data[player.Name].Role
-        end
-        return "Innocent"
-    end
+    local data = getRoleSnapshot()
+
+    -- Origem do tracer: personagem local projetado. Fallback: centro inferior.
     local screenSize = cam.ViewportSize
     local tracerOrigin = Vector2.new(screenSize.X / 2, screenSize.Y)
+    local localChar = LocalPlayer.Character
+    local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
+    local localHum = localChar and localChar:FindFirstChildOfClass("Humanoid")
+    if localHrp and localHum and localHum.Health > 0 then
+        local lp, onScreen = cam:WorldToViewportPoint(localHrp.Position)
+        if onScreen then
+            tracerOrigin = Vector2.new(lp.X, lp.Y)
+        end
+    end
+
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
         local draws = ESP.draws[player] or createPlayerDraws(player)
@@ -984,7 +1061,10 @@ local function updatePlayerESP()
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not head or not hrp or not hum or hum.Health <= 0 then hideDraws(draws) continue end
-        local role = getRole(player)
+        local role = "Innocent"
+        if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
+            role = data[player.Name].Role
+        end
         if not shouldShowRole(role) then hideDraws(draws) continue end
         local headScreen, on1 = cam:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
         local legScreen, on2 = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 2.8, 0))
@@ -1031,8 +1111,15 @@ local function updatePlayerESP()
     end
 end
 
+-- RenderStepped: 60 FPS para tracers e boxes (smooth)
+RunService.RenderStepped:Connect(function()
+    if not (C.ESPEnabled or C.TracersEnabled) then return end
+    pcall(updateDrawings)
+end)
+
+-- Highlights: Heartbeat 15 FPS
 local function updateHighlights()
-    local data = getPlayerData()
+    local data = getRoleSnapshot()
     local function getRole(player)
         if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
             return data[player.Name].Role
@@ -1057,14 +1144,15 @@ local function updateHighlights()
             if hl then pcall(function() hl:Destroy() end) end
             hl = Instance.new("Highlight")
             hl.Name = "ASCRON_HL_" .. player.Name
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
             hl.Parent = char
             ESP.highlights[player] = hl
         end
         local color = getRoleColor(role)
-        hl.FillColor = color; hl.OutlineColor = color
+        hl.FillColor = color
+        hl.OutlineColor = color
         hl.FillTransparency = C.ChamsEnabled and 0.45 or 1
         hl.OutlineTransparency = C.OutlinesEnabled and 0 or 1
-        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     end
     if C.ESPCoin then
         local containers = getCurrencyContainers()
@@ -1077,8 +1165,10 @@ local function updateHighlights()
                         if ESP.coinHighlights[d] then pcall(function() ESP.coinHighlights[d]:Destroy() end) end
                         local cHl = Instance.new("Highlight")
                         cHl.Name = "ASCRON_CoinHL"
-                        cHl.FillColor = COIN_COLOR; cHl.OutlineColor = COIN_COLOR
-                        cHl.FillTransparency = 0.3; cHl.OutlineTransparency = 0
+                        cHl.FillColor = COIN_COLOR
+                        cHl.OutlineColor = COIN_COLOR
+                        cHl.FillTransparency = 0.3
+                        cHl.OutlineTransparency = 0
                         cHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
                         cHl.Parent = d
                         ESP.coinHighlights[d] = cHl
@@ -1105,8 +1195,10 @@ local function updateHighlights()
                         if ESP.gunHighlights[obj] then pcall(function() ESP.gunHighlights[obj]:Destroy() end) end
                         local gHl = Instance.new("Highlight")
                         gHl.Name = "ASCRON_GunHL"
-                        gHl.FillColor = GUN_COLOR; gHl.OutlineColor = GUN_COLOR
-                        gHl.FillTransparency = 0.3; gHl.OutlineTransparency = 0
+                        gHl.FillColor = GUN_COLOR
+                        gHl.OutlineColor = GUN_COLOR
+                        gHl.FillTransparency = 0.3
+                        gHl.OutlineTransparency = 0
                         gHl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
                         gHl.Parent = obj
                         ESP.gunHighlights[obj] = gHl
@@ -1125,15 +1217,11 @@ local function updateHighlights()
     end
 end
 
-local espAccum, hlAccum = 0, 0
+local hlAccum = 0
 RunService.Heartbeat:Connect(function(dt)
-    if not (C.ESPEnabled or C.TracersEnabled or C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
-    espAccum += dt; hlAccum += dt
-    if espAccum >= 0.033 then
-        espAccum = 0
-        pcall(updatePlayerESP)
-    end
-    if hlAccum >= 0.14 then
+    if not (C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
+    hlAccum += dt
+    if hlAccum >= 0.066 then
         hlAccum = 0
         pcall(updateHighlights)
     end
@@ -1160,7 +1248,7 @@ local function buildGui()
     local parent = getGuiParent()
     if not parent then warn("[ASCRON] Sem parent GUI."); return end
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v19"
+    gui.Name = "ASCRON_MM2_v20"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -1183,7 +1271,7 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v19"
+    titleLbl.Text = "ASCRON | MM2 v20"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold; titleLbl.TextSize = 13
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -1450,6 +1538,7 @@ captureSource()
 
 LocalPlayer.CharacterAdded:Connect(function(char)
     pdCache.data = nil; pdCache.timestamp = 0
+    roleSnapshot.data = nil; roleSnapshot.timestamp = 0
     task.wait(0.5)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum then
@@ -1472,7 +1561,7 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[ASCRON] v19 pronta.")
+print("[ASCRON] v20 pronta.")
 if getgenv().ASCRON_SOURCE then
     print("[ASCRON] Source: " .. #getgenv().ASCRON_SOURCE .. " bytes")
 end
