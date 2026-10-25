@@ -1,4 +1,4 @@
--- ASCRON | MM2 AutoFarm v9 (Noclip + SmoothFrameMove + GUI própria + Ações por papel)
+-- ASCRON | MM2 AutoFarm v10 (Toggle fix + GUI compacta + Hop com retry)
 
 local Players             = game:GetService("Players")
 local RunService          = game:GetService("RunService")
@@ -17,7 +17,7 @@ local C = getgenv().ASCRON
 
 C.Currency             = C.Currency or "Coin"
 C.FarmSpeed            = C.FarmSpeed or 22
-C.FarmMode             = C.FarmMode or "Standard"      -- Standard / Lay / Safe
+C.FarmMode             = C.FarmMode or "Standard"
 C.ServerHopPlayerCount = C.ServerHopPlayerCount or 6
 C.HopOnFriendJoin      = C.HopOnFriendJoin or false
 C.AntiAFK              = C.AntiAFK ~= false
@@ -28,7 +28,6 @@ C.Disable3D            = C.Disable3D or false
 C.AutoVoteMode         = C.AutoVoteMode or 0
 C.AutoVoteMax          = C.AutoVoteMax or 0
 
--- Ações por papel (a user pediu separado)
 C.AutoResetInnocent = C.AutoResetInnocent ~= false
 C.AutoFlingMurderer = C.AutoFlingMurderer or false
 C.AutoShootSheriff  = C.AutoShootSheriff  ~= false
@@ -39,6 +38,7 @@ C.AutoResetMurderer = C.AutoResetMurderer or false
 C.Farming = false
 C.FarmThread = nil
 C.HopThread, C.FriendThread, C.VoteThread = nil, nil, nil
+C.HopInProgress = false
 C.LastFullAction = 0
 C.BlackGui = nil
 C.Stats = { TotalCounted = 0, SessionStart = tick(), LastSeenValue = nil }
@@ -135,9 +135,10 @@ end
 local function getCoinContainer()
     for _, obj in ipairs(Workspace:GetChildren()) do
         local c = obj:FindFirstChild("CoinContainer")
-        if c then return c end
+        if c and #c:GetDescendants() > 0 then return c end
     end
-    return nil
+    local fallback = Workspace:FindFirstChild("CoinContainer", true)
+    return fallback
 end
 local function findNearestCoin()
     local hrp = getHRP(); if not hrp then return nil end
@@ -145,7 +146,7 @@ local function findNearestCoin()
     if not container then return nil end
     local best, bestDist = nil, math.huge
     for _, d in ipairs(container:GetDescendants()) do
-        if d:IsA("BasePart") and d:FindFirstChildWhichIsA("TouchTransmitter") then
+        if d:IsA("BasePart") then
             local dist = (hrp.Position - d.Position).Magnitude
             if dist < bestDist then bestDist = dist; best = d end
         end
@@ -153,26 +154,26 @@ local function findNearestCoin()
     return best
 end
 local function collect(coin)
-    local hrp = getHRP(); if not hrp or not coin then return end
-    pcall(function()
-        firetouchinterest(hrp, coin, 0)
-        task.wait(0.03)
-        firetouchinterest(hrp, coin, 1)
-    end)
+    if not coin or not coin.Parent then return end
+    for _ = 1, 3 do
+        local hrp = getHRP(); if not hrp then return end
+        pcall(function()
+            firetouchinterest(hrp, coin, 0)
+            task.wait(0.02)
+            firetouchinterest(hrp, coin, 1)
+        end)
+        task.wait(0.04)
+        if not coin.Parent then return end
+    end
 end
 
--- ===================== MOVIMENTO (por frame, smoothstep) =====================
--- Sem tween, sem BodyVelocity. Cada RenderStepped seta o CFrame direto,
--- então não há janela para a física derrubar o personagem entre passos.
+-- ===================== MOVIMENTO (smoothstep por frame) =====================
 local LAY_ROTATION = CFrame.Angles(math.rad(90), 0, 0)
 local function smoothMove(targetPos, rotate90, speed)
     local hrp = getHRP(); if not hrp then return false end
     local startPos = hrp.Position
     local distance = (targetPos - startPos).Magnitude
-    if distance < 1.5 then
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        return true
-    end
+    if distance < 1.5 then return true end
 
     speed = math.clamp(speed or C.FarmSpeed, 5, 45)
     local duration = math.max(0.25, distance / speed)
@@ -182,29 +183,29 @@ local function smoothMove(targetPos, rotate90, speed)
         local elapsed = tick() - startTime
         if elapsed >= duration then break end
         local alpha = elapsed / duration
-        local eased = alpha * alpha * (3 - 2 * alpha)   -- smoothstep
+        local eased = alpha * alpha * (3 - 2 * alpha)
         local currentPos = startPos:Lerp(targetPos, eased)
 
-        local goalCFrame = CFrame.new(currentPos)
-        if rotate90 then goalCFrame = goalCFrame * LAY_ROTATION end
+        local goal = CFrame.new(currentPos)
+        if rotate90 then goal = goal * LAY_ROTATION end
 
         local h = getHRP(); if not h then return false end
-        h.CFrame = goalCFrame
+        h.CFrame = goal
         h.AssemblyLinearVelocity = Vector3.zero
         h.AssemblyAngularVelocity = Vector3.zero
         RunService.RenderStepped:Wait()
     end
 
-    local finalCFrame = CFrame.new(targetPos)
-    if rotate90 then finalCFrame = finalCFrame * LAY_ROTATION end
+    local final = CFrame.new(targetPos)
+    if rotate90 then final = final * LAY_ROTATION end
     local h = getHRP(); if h then
-        h.CFrame = finalCFrame
+        h.CFrame = final
         h.AssemblyLinearVelocity = Vector3.zero
     end
     return true
 end
 
--- ===================== FARM MODE STATE =====================
+-- ===================== MODOS =====================
 local function applyMode()
     local hum = getHum(); if not hum then return end
     if C.FarmMode == "Lay" or C.FarmMode == "Safe" then
@@ -221,7 +222,7 @@ local function resetMode()
     end
 end
 
--- ===================== DETECÇÃO DE PAPEL =====================
+-- ===================== PAPEL =====================
 local function getPlayerData()
     local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
     if not remote or not remote:IsA("RemoteFunction") then return nil end
@@ -282,7 +283,6 @@ local function killAll()
         end
     end
 end
-
 local function shootMurderer()
     local ch = LocalPlayer.Character
     local gun = ch and ch:FindFirstChild("Gun")
@@ -303,7 +303,6 @@ local function shootMurderer()
     task.wait(0.1)
     VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
 end
-
 local function flingMurderer()
     local murderer = findMurderer()
     if not murderer or not murderer.Character then return end
@@ -323,36 +322,24 @@ local function flingMurderer()
     Debris:AddItem(bv, 0.6)
     Debris:AddItem(bg, 0.6)
 end
-
 local function handleFullBag()
     local role = getMyRole()
     if not role then return end
-
     if role == "Innocent" then
         if C.AutoResetInnocent then
             local hum = getHum(); if hum then hum.Health = 0 end
             return
         end
-        if C.AutoFlingMurderer then
-            flingMurderer()
-            task.wait(0.4)
-        end
+        if C.AutoFlingMurderer then flingMurderer(); task.wait(0.4) end
     elseif role == "Sheriff" then
-        if C.AutoShootSheriff then
-            shootMurderer()
-            task.wait(0.4)
-        end
+        if C.AutoShootSheriff then shootMurderer(); task.wait(0.4) end
     elseif role == "Murderer" then
-        if C.AutoKillMurderer then
-            killAll()
-            task.wait(0.5)
-        end
+        if C.AutoKillMurderer then killAll(); task.wait(0.5) end
         if C.AutoResetMurderer then
             local hum = getHum(); if hum then hum.Health = 0 end
             return
         end
     end
-
     if C.AutoResetAnyRole then
         local hum = getHum(); if hum then hum.Health = 0 end
     end
@@ -390,7 +377,7 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
--- ===================== LOOP DE FARM =====================
+-- ===================== FARM LOOP (CORRIGIDO) =====================
 local function startFarm()
     if C.Farming then return end
     C.Farming = true
@@ -405,16 +392,15 @@ local function startFarm()
                 local targetPos = coin.Position
                 local rotate90 = (C.FarmMode == "Lay" or C.FarmMode == "Safe")
                 if C.FarmMode == "Safe" then
-                    targetPos = targetPos - Vector3.new(0, 20, 0)
+                    targetPos = targetPos - Vector3.new(0, 25, 0)
                 end
                 smoothMove(targetPos, rotate90, C.FarmSpeed)
                 if coin.Parent then collect(coin) end
-                task.wait(0.12)  -- deixa o toque assentar
+                task.wait(0.12)
             else
                 task.wait(0.2)
             end
 
-            -- Ação bolsa cheia
             local st = getStatValue()
             if st and st >= getBagThreshold() and tick() - C.LastFullAction > 2 then
                 C.LastFullAction = tick()
@@ -426,12 +412,17 @@ local function startFarm()
     end)
 end
 local function stopFarm()
+    local wasSafe = (C.FarmMode == "Safe")
     C.Farming = false
     if C.FarmThread then task.cancel(C.FarmThread); C.FarmThread = nil end
     resetMode()
+    if wasSafe then
+        local hrp = getHRP()
+        if hrp then hrp.CFrame = hrp.CFrame + Vector3.new(0, 30, 0) end
+    end
 end
 
--- ===================== SERVER HOP (random 1–3) =====================
+-- ===================== HOP COM RETRY =====================
 local function captureSource()
     if getgenv().ASCRON_SOURCE then return end
     local ok, info = pcall(function() return debug.getinfo(1, "S") end)
@@ -441,23 +432,18 @@ local function captureSource()
 end
 captureSource()
 
-local function hop()
+local function hopAttempt()
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
     local ok, res = pcall(function() return HttpService:JSONDecode(game:HttpGet(url)) end)
-    if not ok or not res or not res.data then return end
+    if not ok or not res or not res.data then return false end
 
-    -- Pega todos os servidores com 1–3 jogadores e escolhe UM aleatório.
-    -- Assim não caímos sempre no "melhor" que todos os outros bots também buscam.
     local pool = {}
     for _, s in ipairs(res.data) do
-        if s.id ~= game.JobId
-           and s.playing >= 1
-           and s.playing <= 3
-           and s.playing < s.maxPlayers then
+        if s.id ~= game.JobId and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then
             table.insert(pool, s)
         end
     end
-    if #pool == 0 then return end
+    if #pool == 0 then return false end
     local target = pool[math.random(1, #pool)]
 
     local src = getgenv().ASCRON_SOURCE
@@ -467,10 +453,39 @@ local function hop()
     end
     local opts = Instance.new("TeleportOptions")
     opts.ServerInstanceId = target.id
-    pcall(function()
+    local success = pcall(function()
         TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer, opts)
     end)
+    return success
 end
+
+local function hop()
+    if C.HopInProgress then return end
+    C.HopInProgress = true
+    task.spawn(function()
+        local attempts = 0
+        while C.HopInProgress and attempts < 8 do
+            attempts += 1
+            local ok = hopAttempt()
+            if ok then
+                task.wait(6)  -- se o teleporte for bem, o script descarrega aqui
+            else
+                task.wait(2)
+            end
+        end
+        C.HopInProgress = false
+    end)
+end
+
+-- Listener: se o teleporte falhar (servidor sumiu), destrava o retry
+TeleportService.TeleportInitFailed:Connect(function(player, result, errorMsg)
+    if player == LocalPlayer and C.HopInProgress then
+        warn("[ASCRON] Teleport failed: " .. tostring(errorMsg) .. " — retrying")
+        C.HopInProgress = false
+        task.delay(2, hop)
+    end
+end)
+
 local function startHopMonitor()
     if C.HopThread then return end
     C.HopThread = task.spawn(function()
@@ -587,7 +602,7 @@ local function stopAutoVote()
     if C.VoteThread then task.cancel(C.VoteThread); C.VoteThread = nil end
 end
 
--- ===================== GUI PRÓPRIA =====================
+-- ===================== GUI (compacta) =====================
 local function getGuiParent()
     do local ok, r = pcall(function() return gethui() end); if ok and r then return r end end
     do local ok, r = pcall(function() return game:GetService("CoreGui") end); if ok and r then return r end end
@@ -597,23 +612,20 @@ end
 
 local function buildGui()
     local parent = getGuiParent()
-    if not parent then
-        warn("[ASCRON] Nenhum parent de GUI disponível.")
-        return
-    end
+    if not parent then warn("[ASCRON] Nenhum parent de GUI disponível."); return end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v9"
+    gui.Name = "ASCRON_MM2_v10"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
-    pcall(function()
-        if syn and syn.protect_gui then syn.protect_gui(gui) end
-    end)
+    pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
     gui.Parent = parent
 
+    local W, H = 360, 420
+
     local main = Instance.new("Frame")
-    main.Size = UDim2.new(0, 420, 0, 520)
+    main.Size = UDim2.new(0, W, 0, H)
     main.Position = UDim2.new(0, 40, 0, 40)
     main.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
     main.BorderSizePixel = 0
@@ -621,56 +633,54 @@ local function buildGui()
     main.Draggable = true
     main.Parent = gui
 
-    -- Title bar
     local titleBar = Instance.new("Frame")
-    titleBar.Size = UDim2.new(1, 0, 0, 32)
+    titleBar.Size = UDim2.new(1, 0, 0, 28)
     titleBar.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
     titleBar.BorderSizePixel = 0
     titleBar.Parent = main
 
     local titleLbl = Instance.new("TextLabel")
-    titleLbl.Size = UDim2.new(1, -80, 1, 0)
-    titleLbl.Position = UDim2.new(0, 10, 0, 0)
+    titleLbl.Size = UDim2.new(1, -70, 1, 0)
+    titleLbl.Position = UDim2.new(0, 8, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 AutoFarm v9"
+    titleLbl.Text = "ASCRON | MM2 v10"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold
-    titleLbl.TextSize = 14
+    titleLbl.TextSize = 12
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
     titleLbl.Parent = titleBar
 
     local minBtn = Instance.new("TextButton")
-    minBtn.Size = UDim2.new(0, 28, 0, 22)
-    minBtn.Position = UDim2.new(1, -64, 0, 5)
+    minBtn.Size = UDim2.new(0, 24, 0, 20)
+    minBtn.Position = UDim2.new(1, -52, 0, 4)
     minBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
     minBtn.Text = "—"
     minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     minBtn.Font = Enum.Font.GothamBold
-    minBtn.TextSize = 14
+    minBtn.TextSize = 12
     minBtn.Parent = titleBar
 
     local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(0, 28, 0, 22)
-    closeBtn.Position = UDim2.new(1, -32, 0, 5)
+    closeBtn.Size = UDim2.new(0, 24, 0, 20)
+    closeBtn.Position = UDim2.new(1, -26, 0, 4)
     closeBtn.BackgroundColor3 = Color3.fromRGB(120, 30, 30)
     closeBtn.Text = "X"
     closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 14
+    closeBtn.TextSize = 12
     closeBtn.Parent = titleBar
 
     local collapsed = false
     minBtn.MouseButton1Click:Connect(function()
         collapsed = not collapsed
-        main.Size = collapsed and UDim2.new(0, 420, 0, 32) or UDim2.new(0, 420, 0, 520)
+        main.Size = collapsed and UDim2.new(0, W, 0, 28) or UDim2.new(0, W, 0, H)
         minBtn.Text = collapsed and "+" or "—"
     end)
     closeBtn.MouseButton1Click:Connect(function() gui:Destroy() end)
 
-    -- Tab bar
     local tabBar = Instance.new("Frame")
-    tabBar.Size = UDim2.new(1, 0, 0, 30)
-    tabBar.Position = UDim2.new(0, 0, 0, 32)
+    tabBar.Size = UDim2.new(1, 0, 0, 26)
+    tabBar.Position = UDim2.new(0, 0, 0, 28)
     tabBar.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
     tabBar.BorderSizePixel = 0
     tabBar.Parent = main
@@ -680,23 +690,21 @@ local function buildGui()
     tabLayout.Padding = UDim.new(0, 0)
     tabLayout.Parent = tabBar
 
-    -- Content
     local content = Instance.new("Frame")
-    content.Size = UDim2.new(1, 0, 1, -62)
-    content.Position = UDim2.new(0, 0, 0, 62)
+    content.Size = UDim2.new(1, 0, 1, -54)
+    content.Position = UDim2.new(0, 0, 0, 54)
     content.BackgroundTransparency = 1
     content.Parent = main
 
     local tabs = {}
-    local activeTab = nil
     local function makeTab(name)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 100, 1, 0)
+        btn.Size = UDim2.new(0, 70, 1, 0)
         btn.BackgroundColor3 = Color3.fromRGB(24, 24, 24)
         btn.Text = name
         btn.TextColor3 = Color3.fromRGB(180, 180, 180)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
+        btn.TextSize = 11
         btn.Parent = tabBar
 
         local frame = Instance.new("ScrollingFrame")
@@ -708,22 +716,21 @@ local function buildGui()
         frame.Parent = content
 
         local list = Instance.new("UIListLayout")
-        list.Padding = UDim.new(0, 6)
+        list.Padding = UDim.new(0, 4)
         list.SortOrder = Enum.SortOrder.LayoutOrder
         list.Parent = frame
 
         local pad = Instance.new("UIPadding")
-        pad.PaddingTop = UDim.new(0, 10)
-        pad.PaddingLeft = UDim.new(0, 10)
-        pad.PaddingRight = UDim.new(0, 10)
+        pad.PaddingTop = UDim.new(0, 8)
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.PaddingRight = UDim.new(0, 8)
         pad.Parent = frame
 
         tabs[name] = { btn = btn, frame = frame, list = list }
 
-        local function updateCanvas()
-            frame.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 20)
-        end
-        list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(updateCanvas)
+        list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            frame.CanvasSize = UDim2.new(0, 0, 0, list.AbsoluteContentSize.Y + 16)
+        end)
 
         btn.MouseButton1Click:Connect(function()
             for _, t in pairs(tabs) do
@@ -734,7 +741,6 @@ local function buildGui()
             frame.Visible = true
             btn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
             btn.TextColor3 = Color3.fromRGB(255, 200, 0)
-            activeTab = name
         end)
 
         return frame
@@ -742,19 +748,19 @@ local function buildGui()
 
     local mainTab = makeTab("Main")
     local actionsTab = makeTab("Actions")
-    local protectTab = makeTab("Protection")
+    local protectTab = makeTab("Protect")
     local serverTab = makeTab("Server")
     local voteTab = makeTab("Vote")
 
-    -- ===== WIDGETS =====
+    -- Widgets
     local function makeLabel(parent, text, order)
         local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, 0, 0, 18)
+        l.Size = UDim2.new(1, 0, 0, 16)
         l.BackgroundTransparency = 1
         l.Text = text
         l.TextColor3 = Color3.fromRGB(160, 160, 160)
         l.Font = Enum.Font.Gotham
-        l.TextSize = 11
+        l.TextSize = 10
         l.TextXAlignment = Enum.TextXAlignment.Left
         l.LayoutOrder = order
         l.Parent = parent
@@ -763,29 +769,29 @@ local function buildGui()
 
     local function makeToggle(parent, text, initial, order, cb)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 30)
+        row.Size = UDim2.new(1, 0, 0, 26)
         row.BackgroundTransparency = 1
         row.LayoutOrder = order
         row.Parent = parent
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -60, 1, 0)
+        lbl.Size = UDim2.new(1, -55, 1, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = text
         lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.Gotham
-        lbl.TextSize = 13
+        lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
 
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 50, 0, 22)
-        btn.Position = UDim2.new(1, -55, 0.5, -11)
+        btn.Size = UDim2.new(0, 46, 0, 20)
+        btn.Position = UDim2.new(1, -50, 0.5, -10)
         btn.BackgroundColor3 = initial and Color3.fromRGB(0, 130, 0) or Color3.fromRGB(55, 55, 55)
         btn.Text = initial and "ON" or "OFF"
         btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 11
+        btn.TextSize = 10
         btn.Parent = row
 
         local state = initial
@@ -800,29 +806,29 @@ local function buildGui()
 
     local function makeInput(parent, labelText, value, order, cb)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 26)
+        row.Size = UDim2.new(1, 0, 0, 24)
         row.BackgroundTransparency = 1
         row.LayoutOrder = order
         row.Parent = parent
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -90, 1, 0)
+        lbl.Size = UDim2.new(1, -80, 1, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = labelText
         lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.Gotham
-        lbl.TextSize = 12
+        lbl.TextSize = 11
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
 
         local box = Instance.new("TextBox")
-        box.Size = UDim2.new(0, 80, 0, 22)
-        box.Position = UDim2.new(1, -85, 0.5, -11)
+        box.Size = UDim2.new(0, 70, 0, 20)
+        box.Position = UDim2.new(1, -75, 0.5, -10)
         box.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
         box.TextColor3 = Color3.fromRGB(255, 255, 255)
         box.Text = tostring(value)
         box.Font = Enum.Font.Gotham
-        box.TextSize = 12
+        box.TextSize = 11
         box.Parent = row
         box.FocusLost:Connect(function() cb(box.Text) end)
         return row
@@ -830,29 +836,29 @@ local function buildGui()
 
     local function makeCycle(parent, labelText, options, currentIndex, order, cb)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 30)
+        row.Size = UDim2.new(1, 0, 0, 26)
         row.BackgroundTransparency = 1
         row.LayoutOrder = order
         row.Parent = parent
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -140, 1, 0)
+        lbl.Size = UDim2.new(1, -130, 1, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = labelText
         lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
         lbl.Font = Enum.Font.Gotham
-        lbl.TextSize = 12
+        lbl.TextSize = 11
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
 
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 130, 0, 22)
-        btn.Position = UDim2.new(1, -135, 0.5, -11)
+        btn.Size = UDim2.new(0, 120, 0, 20)
+        btn.Position = UDim2.new(1, -125, 0.5, -10)
         btn.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
         btn.Text = options[currentIndex]
         btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Font = Enum.Font.Gotham
-        btn.TextSize = 12
+        btn.TextSize = 11
         btn.Parent = row
 
         local idx = currentIndex
@@ -864,12 +870,11 @@ local function buildGui()
         return row
     end
 
-    -- ===== MAIN TAB =====
+    -- MAIN TAB
     local order = 0
     local function nextOrder() order += 1; return order end
 
     makeToggle(mainTab, "AUTO FARM", C.Farming, nextOrder(), function(s)
-        C.Farming = s
         if s then startFarm() else stopFarm() end
     end)
 
@@ -879,22 +884,22 @@ local function buildGui()
     end)
 
     makeLabel(mainTab, "— Movement —", nextOrder())
-    makeInput(mainTab, "Speed (studs/sec)", C.FarmSpeed, nextOrder(), function(v)
+    makeInput(mainTab, "Speed (studs/s)", C.FarmSpeed, nextOrder(), function(v)
         local n = tonumber(v); if n then C.FarmSpeed = math.clamp(n, 8, 45) end
     end)
     makeCycle(mainTab, "Mode", {"Standard","Lay","Safe"}, 1, nextOrder(), function(option)
         C.FarmMode = option
     end)
 
-    makeLabel(mainTab, "— Session Stats —", nextOrder())
+    makeLabel(mainTab, "— Stats —", nextOrder())
     local statsLbl = Instance.new("TextLabel")
-    statsLbl.Size = UDim2.new(1, 0, 0, 50)
+    statsLbl.Size = UDim2.new(1, 0, 0, 46)
     statsLbl.BackgroundColor3 = Color3.fromRGB(30, 28, 0)
     statsLbl.BorderSizePixel = 0
     statsLbl.TextColor3 = Color3.fromRGB(255, 220, 100)
     statsLbl.Font = Enum.Font.Code
-    statsLbl.TextSize = 13
-    statsLbl.Text = "Collected: 0\nPer hour: 0\nBag threshold: 40"
+    statsLbl.TextSize = 12
+    statsLbl.Text = "Collected: 0\nPer hour: 0\nBag full at: 40"
     statsLbl.LayoutOrder = nextOrder()
     statsLbl.Parent = mainTab
 
@@ -902,29 +907,26 @@ local function buildGui()
         while statsLbl.Parent do
             task.wait(1)
             statsLbl.Text = string.format(
-                "Collected: %d\nPer hour: %d\nBag threshold: %d",
+                "Collected: %d\nPer hour: %d\nBag full at: %d",
                 C.Stats.TotalCounted, getRatePerHour(), getBagThreshold()
             )
         end
     end)
 
-    -- ===== ACTIONS TAB =====
+    -- ACTIONS TAB
     order = 0
     makeLabel(actionsTab, "— Innocent —", nextOrder())
     makeToggle(actionsTab, "Reset when bag full", C.AutoResetInnocent, nextOrder(), function(s) C.AutoResetInnocent = s end)
     makeToggle(actionsTab, "Fling murderer when bag full", C.AutoFlingMurderer, nextOrder(), function(s) C.AutoFlingMurderer = s end)
-
     makeLabel(actionsTab, "— Sheriff —", nextOrder())
     makeToggle(actionsTab, "Shoot murderer when bag full", C.AutoShootSheriff, nextOrder(), function(s) C.AutoShootSheriff = s end)
-
     makeLabel(actionsTab, "— Murderer —", nextOrder())
     makeToggle(actionsTab, "Kill all when bag full", C.AutoKillMurderer, nextOrder(), function(s) C.AutoKillMurderer = s end)
     makeToggle(actionsTab, "Reset when bag full", C.AutoResetMurderer, nextOrder(), function(s) C.AutoResetMurderer = s end)
-
     makeLabel(actionsTab, "— Universal —", nextOrder())
     makeToggle(actionsTab, "Reset regardless of role", C.AutoResetAnyRole, nextOrder(), function(s) C.AutoResetAnyRole = s end)
 
-    -- ===== PROTECTION TAB =====
+    -- PROTECT TAB
     order = 0
     makeToggle(protectTab, "Anti-AFK", C.AntiAFK, nextOrder(), function(s)
         C.AntiAFK = s; if s then startAntiAFK() end
@@ -934,38 +936,34 @@ local function buildGui()
     end)
     makeToggle(protectTab, "Anti-Fling", C.AntiFling, nextOrder(), function(s) C.AntiFling = s end)
     makeToggle(protectTab, "Noclip", C.Noclip, nextOrder(), function(s)
-        C.Noclip = s
-        if s then startNoclip() else stopNoclip() end
+        C.Noclip = s; if s then startNoclip() else stopNoclip() end
     end)
     makeToggle(protectTab, "Disable 3D Rendering", C.Disable3D, nextOrder(), function(s)
         C.Disable3D = s
         pcall(function() RunService:Set3dRenderingEnabled(not s) end)
     end)
 
-    -- ===== SERVER TAB =====
+    -- SERVER TAB
     order = 0
     makeInput(serverTab, "Hop if players >", C.ServerHopPlayerCount, nextOrder(), function(v)
         local n = tonumber(v); if n then C.ServerHopPlayerCount = n end
     end)
     makeToggle(serverTab, "Hop when friend joins", C.HopOnFriendJoin, nextOrder(), function(s)
-        C.HopOnFriendJoin = s
-        if s then startFriendMonitor() end
+        C.HopOnFriendJoin = s; if s then startFriendMonitor() end
     end)
 
-    -- ===== VOTE TAB =====
+    -- VOTE TAB
     order = 0
-    makeCycle(voteTab, "Vote mode", {"OFF","Smallest Map","Largest Map","Random"}, 1, nextOrder(), function(option)
-        local map = {OFF = 0, ["Smallest Map"] = 1, ["Largest Map"] = 2, Random = 3}
+    makeCycle(voteTab, "Vote mode", {"OFF","Smallest","Largest","Random"}, 1, nextOrder(), function(option)
+        local map = {OFF = 0, Smallest = 1, Largest = 2, Random = 3}
         C.AutoVoteMode = map[option] or 0
         if C.AutoVoteMode ~= 0 then startAutoVote() else stopAutoVote() end
     end)
-    makeInput(voteTab, "Max votes (0 = infinite)", C.AutoVoteMax, nextOrder(), function(v)
+    makeInput(voteTab, "Max votes (0=inf)", C.AutoVoteMax, nextOrder(), function(v)
         local n = tonumber(v); if n then C.AutoVoteMax = math.max(0, n) end
     end)
 
-    -- Ativa primeira aba
     tabs["Main"].btn.MouseButton1Click:Fire()
-
     print("[ASCRON] GUI construída em: " .. tostring(parent))
 end
 
@@ -979,4 +977,4 @@ if C.ServerHopPlayerCount > 0 then startHopMonitor() end
 if C.HopOnFriendJoin then startFriendMonitor() end
 
 buildGui()
-print("[ASCRON] v9 pronta.")
+print("[ASCRON] v10 pronta.")
