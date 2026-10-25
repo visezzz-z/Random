@@ -1,4 +1,4 @@
--- Lambda Hub | v0.21 | By ASCRON
+-- Lambda Hub | v0.21 | By kerli
 -- Stealth farm | Rewritten ESP | URL reexec | Debounced round detection
 
 print("[Lambda] v0.21 loading")
