@@ -1,7 +1,7 @@
--- ASCRON | MM2 AutoFarm v17
--- Bag multi-source | Death/round detection | ESP throttled
+-- ASCRON | MM2 AutoFarm v18
+-- Fix: unanchor on round end | Tracer origin fixed | Multi-executor reexecution
 
-print("[ASCRON] === v17 loading ===")
+print("[ASCRON] === v18 loading ===")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -99,17 +99,24 @@ local function getPlayerData()
 end
 
 -- ===================== ROUND STATE =====================
+-- Retorna false se o jogador está morto, no lobby, ou sem papel.
+-- Também verifica se o container de moedas existe no mapa.
 local function isInActiveRound()
     local data = getPlayerData()
-    if not data then return true end
-    local me = data[LocalPlayer.Name]
-    if not me then return true end
-    if me.Dead == true or me.Killed == true then return false end
-    if me.Role == "None" then return false end
+    if data then
+        local me = data[LocalPlayer.Name]
+        if me then
+            if me.Dead == true or me.Killed == true then return false end
+            if me.Role == "None" then return false end
+        end
+    end
+    -- Se não há container de moeda no mapa, não há rodada ativa
+    local containers = getCurrencyContainers()
+    if #containers == 0 then return false end
     return true
 end
 
--- ===================== BAG (multi-source, pattern match) =====================
+-- ===================== BAG =====================
 local EVENT_CURRENCIES = { Candy=true, SnowToken=true, Token=true, Shell=true, Egg=true, Present=true, Gift=true, Gem=true }
 local function getBagThreshold()
     if C.BagThresholdOverride and C.BagThresholdOverride > 0 then return C.BagThresholdOverride end
@@ -347,13 +354,17 @@ local function travelTo(targetPos, rotate90, speed, coinRef)
     speed = math.clamp(speed or C.FarmSpeed, 8, 60)
     local rotation = rotate90 and LAY_ROTATION or hrp.CFrame.Rotation
     local lastTime = tick()
+    local startTime = tick()
+    local maxTravelTime = 15 -- segurança: máximo 15 segundos por moeda
     while C.Farming do
+        -- Aborta se rodada acabou, personagem morreu, ou moeda sumiu
+        if not isInActiveRound() then return false end
         local h = getHRP()
         if not h or not h.Anchored then return false end
         if coinRef and not coinRef.Parent then return false end
         local curHum = getHum()
         if not curHum or curHum.Health <= 0 then return false end
-        if not isInActiveRound() then return false end
+        if tick() - startTime > maxTravelTime then return false end
         local delta = targetPos - h.Position
         local dist = delta.Magnitude
         if dist < 2.5 then
@@ -519,6 +530,27 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
+-- ===================== ROUND END WATCHER =====================
+-- Desancora imediatamente quando a rodada termina, para evitar que o
+-- servidor teleporte o HRP ancorado e o personagem "voe".
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if not C.Farming then continue end
+        if isInActiveRound() then continue end
+        -- Rodada acabou: desancora e solta o personagem
+        local hrp = getHRP()
+        if hrp and hrp.Anchored then
+            pcall(function() hrp.Anchored = false end)
+            local hum = getHum()
+            if hum then
+                hum.PlatformStand = false
+                hum.AutoRotate = true
+            end
+        end
+    end
+end)
+
 -- ===================== FARM LOOP =====================
 local function startFarm()
     if C.Farming then return end
@@ -566,7 +598,7 @@ local function stopFarm()
     endFarmMovement()
 end
 
--- ===================== SOURCE + REEXEC =====================
+-- ===================== SOURCE + REEXEC (multi-executor) =====================
 local function captureSource()
     if getgenv().ASCRON_SOURCE then return true end
     local env = getgenv()
@@ -628,17 +660,53 @@ local function queueForReexecution()
     end
     local write = type(writefile) == "function" and writefile or getgenv().writefile
     if write then pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE) end
+
+    -- Loader pequeno: lê o arquivo e executa. Cabe no limite de qualquer executor.
     local loader = "pcall(function() local s = readfile('" .. SOURCE_FILE .. "'); if s and #s > 100 then loadstring(s)() end end)"
-    if syn and syn.queue_on_teleport then
-        if pcall(syn.queue_on_teleport, loader) then print("[ASCRON] Reexec: syn"); return true end
+
+    -- 1. syn.queue_on_teleport (Synapse, Delta, Arceus X frequentemente expõem syn)
+    if syn and type(syn.queue_on_teleport) == "function" then
+        if pcall(syn.queue_on_teleport, loader) then
+            print("[ASCRON] Reexec: syn.queue_on_teleport (loader)")
+            return true
+        end
+        if pcall(syn.queue_on_teleport, getgenv().ASCRON_SOURCE) then
+            print("[ASCRON] Reexec: syn.queue_on_teleport (full)")
+            return true
+        end
     end
+
+    -- 2. queue_on_teleport global (Xeno, Solara, Potassium, e muitos outros)
     if type(queue_on_teleport) == "function" then
-        if pcall(queue_on_teleport, loader) then print("[ASCRON] Reexec: global"); return true end
+        if pcall(queue_on_teleport, loader) then
+            print("[ASCRON] Reexec: queue_on_teleport (loader)")
+            return true
+        end
+        if pcall(queue_on_teleport, getgenv().ASCRON_SOURCE) then
+            print("[ASCRON] Reexec: queue_on_teleport (full)")
+            return true
+        end
     end
+
+    -- 3. getgenv().queue_on_teleport (alguns executores móveis injetam aqui)
     local g = getgenv()
     if g and type(g.queue_on_teleport) == "function" then
-        if pcall(g.queue_on_teleport, loader) then print("[ASCRON] Reexec: getgenv"); return true end
+        if pcall(g.queue_on_teleport, loader) then
+            print("[ASCRON] Reexec: getgenv().queue_on_teleport")
+            return true
+        end
     end
+
+    -- 4. queueonteleport (variante sem underscore, vista em Solara antigo)
+    if type(queueonteleport) == "function" then
+        if pcall(queueonteleport, loader) then
+            print("[ASCRON] Reexec: queueonteleport")
+            return true
+        end
+    end
+
+    warn("[ASCRON] Reexec: nenhum método de queue disponível neste executor.")
+    warn("[ASCRON] Ative Auto-Execute no executor e aponte para " .. SOURCE_FILE)
     return false
 end
 
@@ -899,6 +967,8 @@ local function updatePlayerESP()
         return "Innocent"
     end
     local screenSize = cam.ViewportSize
+    -- Origem fixa do tracer: centro inferior da tela
+    local tracerOrigin = Vector2.new(screenSize.X / 2, screenSize.Y)
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
         local draws = ESP.draws[player] or createPlayerDraws(player)
@@ -946,7 +1016,7 @@ local function updatePlayerESP()
             if draws.hFill then draws.hFill.Visible = false end
         end
         if C.TracersEnabled and draws.tracer then
-            draws.tracer.From = Vector2.new(screenSize.X / 2, screenSize.Y)
+            draws.tracer.From = tracerOrigin
             draws.tracer.To = Vector2.new(headScreen.X, headScreen.Y)
             draws.tracer.Color = color; draws.tracer.Visible = true
         elseif draws.tracer then
@@ -1049,16 +1119,16 @@ local function updateHighlights()
     end
 end
 
--- Throttled ESP loop (20 FPS player ESP, ~6 FPS highlights)
+-- ESP throttling: tracers/boxes a 30 FPS, highlights a ~7 FPS
 local espAccum, hlAccum = 0, 0
 RunService.Heartbeat:Connect(function(dt)
     if not (C.ESPEnabled or C.TracersEnabled or C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
     espAccum += dt; hlAccum += dt
-    if espAccum >= 0.05 then
+    if espAccum >= 0.033 then
         espAccum = 0
         pcall(updatePlayerESP)
     end
-    if hlAccum >= 0.15 then
+    if hlAccum >= 0.14 then
         hlAccum = 0
         pcall(updateHighlights)
     end
@@ -1085,7 +1155,7 @@ local function buildGui()
     local parent = getGuiParent()
     if not parent then warn("[ASCRON] Sem parent GUI."); return end
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v17"
+    gui.Name = "ASCRON_MM2_v18"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -1108,7 +1178,7 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v17"
+    titleLbl.Text = "ASCRON | MM2 v18"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold; titleLbl.TextSize = 13
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -1373,7 +1443,6 @@ end
 -- ===================== INIT =====================
 captureSource()
 
--- Reset PD cache on respawn + death listener that immediately unanchors
 LocalPlayer.CharacterAdded:Connect(function(char)
     pdCache.data = nil; pdCache.timestamp = 0
     task.wait(0.5)
@@ -1404,4 +1473,10 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[ASCRON] v17 pronta.")
+print("[ASCRON] v18 pronta.")
+print("[ASCRON] HWID: " .. HWID)
+if getgenv().ASCRON_SOURCE then
+    print("[ASCRON] Source: " .. #getgenv().ASCRON_SOURCE .. " bytes")
+else
+    warn("[ASCRON] Source não capturada — reexec via queue pode falhar.")
+end
