@@ -1,7 +1,7 @@
--- Lambda Hub | v0.21 | By kerli
--- Stealth farm | Rewritten ESP | URL reexec | Debounced round detection
+-- Lambda Hub | v0.22 | By ASCRON
+-- Server hop sem crash | Reexec via URL | Threshold 50 default
 
-print("[Lambda] v0.21 loading")
+print("[Lambda] v0.22 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -51,7 +51,7 @@ local DEFAULTS = {
     AntiAFK=true, AntiVoid=true, AntiFling=true, Noclip=true, AntiMurderer=false,
     Disable3D=false, VoteMode=0, VoteMax=0,
     ResetInnocent=true, FlingMurderer=false, ShootSheriff=true, ResetAnyRole=false,
-    KillMurderer=true, ResetMurderer=false, Threshold=0, ResetAfterAction=true,
+    KillMurderer=true, ResetMurderer=false, Threshold=50, ResetAfterAction=true,
     ReexecURL="",
     ESPOn=false, TracersOn=false, ChamsOn=false, OutlinesOn=false,
     ShowMurderer=true, ShowSheriff=true, ShowHero=true, ShowInnocent=true,
@@ -89,7 +89,7 @@ local TEXT_BRIGHT = Color3.fromRGB(220,220,220)
 local function HRP() local c=LocalPlayer.Character; return c and c:FindFirstChild("HumanoidRootPart") end
 local function HUM() local c=LocalPlayer.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 
--- ============ Background GetPlayerData (single thread, all reads from cache) ============
+-- ============ Background GetPlayerData ============
 local pdCache = { data=nil, ts=0 }
 task.spawn(function()
     while true do
@@ -133,7 +133,7 @@ local function hardReset()
     local u=HUM(); if u then u.PlatformStand=false; u.AutoRotate=true; if u.Health>0 then u.Health=0 end end
 end
 
--- ============ Bag from leaderstats (no yield) ============
+-- ============ Bag (threshold 50 default) ============
 local EVENT_CURR = { Candy=true, SnowToken=true, Token=true, Shell=true, Egg=true, Present=true, Gift=true, Gem=true }
 local function threshold()
     if C.Threshold>0 then return C.Threshold end
@@ -227,7 +227,6 @@ local function startFling()
     end)
 end
 
--- ============ Anti-Murderer (safer: down instead of horizontal) ============
 local function startAntiMurderer()
     if C.AntiMurdererThread then task.cancel(C.AntiMurdererThread) end
     C.AntiMurdererThread = task.spawn(function()
@@ -242,7 +241,6 @@ local function startAntiMurderer()
                         if mh and (h.Position-mh.Position).Magnitude<25 then
                             local was=h.Anchored
                             if was then h.Anchored=false end
-                            -- Desce 30 studs em vez de 200 horizontal (não sai do mapa)
                             h.CFrame=CFrame.new(h.Position-Vector3.new(0,30,0))*h.CFrame.Rotation
                             if was then h.Anchored=true end
                         end
@@ -470,7 +468,7 @@ local function rate()
     return math.floor((C.Stats.Total/e)*3600)
 end
 
--- ============ Round watcher (debounced) ============
+-- ============ Round watcher ============
 task.spawn(function()
     local lastC=nil
     while true do
@@ -497,7 +495,7 @@ task.spawn(function()
     end
 end)
 
--- ============ Farm loop with stealth depth ============
+-- ============ Farm loop ============
 local function farm()
     if C.Farming then return end
     C.Farming=true; C.FarmStatus="starting"
@@ -510,17 +508,13 @@ local function farm()
 
             local coin=nearestCoin()
             if coin then
-                -- Stealth: abaixo da superfície, sobe para moeda, coleta, desce
                 local depth = C.FarmMode=="Stealth" and C.Depth or 0
                 local rot90 = C.FarmMode=="Lay"
-
                 if depth>0 then
-                    -- Fase 1: viaja para baixo da moeda
                     local below = coin.Position - Vector3.new(0, depth, 0)
                     if not h.Anchored then beginMove(); task.wait(0.03) end
                     C.FarmStatus="travel-below"
                     if travel(below, rot90, C.Speed, coin) then
-                        -- Fase 2: sobe para pegar
                         C.FarmStatus="rise"
                         local above = coin.Position + Vector3.new(0, C.CoinRise, 0)
                         travel(above, rot90, C.Speed*1.6, coin)
@@ -531,7 +525,6 @@ local function farm()
                             while coin.Parent and tick()-t<0.25 do task.wait(0.02) end
                             if coin.Parent then C.CollectFails=C.CollectFails+1 else C.CollectFails=0 end
                         end
-                        -- Fase 3: desce de volta
                         C.FarmStatus="descend"
                         travel(coin.Position - Vector3.new(0, depth, 0), rot90, C.Speed*1.6, nil)
                     end
@@ -593,6 +586,7 @@ local function captureSrc()
     end
 end
 
+-- Prioridade: URL remota (payload pequeno). Fallback: readfile (payload médio).
 local function getPayload()
     if C.ReexecURL and C.ReexecURL~="" then
         return 'pcall(function() loadstring(game:HttpGet("'..C.ReexecURL..'"))() end)', "url"
@@ -605,27 +599,31 @@ local function getPayload()
     if wr then pcall(wr,SRC,src) end
     return "pcall(function() local s=readfile('"..SRC.."'); if s and #s>100 then loadstring(s)() end end)", "file"
 end
+
+-- Cadeia de fallback completa: syn → fluxus → krnl → global → getgenv → queueonteleport
 local function queueReexec()
     local p,k=getPayload()
     if not p then warn("[Lambda] Reexec: sem URL e sem source"); return false end
-    if syn and type(syn.queue_on_teleport)=="function" then
-        if pcall(syn.queue_on_teleport,p) then print("[Lambda] Reexec: syn ("..k..")"); return true end
+    local wrappers = {
+        {name="syn", fn=function() if syn and type(syn.queue_on_teleport)=="function" then return syn.queue_on_teleport end end},
+        {name="fluxus", fn=function() if fluxus and type(fluxus.queue_on_teleport)=="function" then return fluxus.queue_on_teleport end end},
+        {name="krnl", fn=function() if krnl and type(krnl.queue_on_teleport)=="function" then return krnl.queue_on_teleport end end},
+        {name="queue_on_teleport", fn=function() if type(queue_on_teleport)=="function" then return queue_on_teleport end end},
+        {name="getgenv().queue_on_teleport", fn=function() local g=getgenv(); if g and type(g.queue_on_teleport)=="function" then return g.queue_on_teleport end end},
+        {name="queueonteleport", fn=function() if type(queueonteleport)=="function" then return queueonteleport end end},
+    }
+    for _,w in ipairs(wrappers) do
+        local ok, fn = pcall(w.fn)
+        if ok and fn then
+            local ok2 = pcall(fn, p)
+            if ok2 then print("[Lambda] Reexec: "..w.name.." ("..k..")"); return true end
+        end
     end
-    if type(queue_on_teleport)=="function" then
-        if pcall(queue_on_teleport,p) then print("[Lambda] Reexec: queue_on_teleport ("..k..")"); return true end
-    end
-    local g=getgenv()
-    if g and type(g.queue_on_teleport)=="function" then
-        if pcall(g.queue_on_teleport,p) then print("[Lambda] Reexec: getgenv ("..k..")"); return true end
-    end
-    if type(queueonteleport)=="function" then
-        if pcall(queueonteleport,p) then print("[Lambda] Reexec: queueonteleport ("..k..")"); return true end
-    end
-    warn("[Lambda] Reexec: nenhum método disponível")
+    warn("[Lambda] Reexec: nenhum método disponível. Ative Auto-Execute para "..SRC)
     return false
 end
 
--- ============ Kick hook with teleport guard ============
+-- ============ Kick hook com guarda ============
 pcall(function()
     if not (getrawmetatable and setreadonly and newcclosure) then return end
     local mt=getrawmetatable(game)
@@ -638,7 +636,7 @@ pcall(function()
             C.IsTeleporting=true
             queueReexec()
             task.spawn(function()
-                task.wait(0.1)
+                task.wait(0.15)
                 pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
             end)
             return nil
@@ -649,7 +647,7 @@ pcall(function()
     print("[Lambda] Kick hook on")
 end)
 
--- ============ Server hop (single connection, guarded) ============
+-- ============ HTTP ============
 local function httpGet(u)
     local m={
         function() return game:HttpGet(u) end,
@@ -660,6 +658,8 @@ local function httpGet(u)
     for _,f in ipairs(m) do local ok,r=pcall(f); if ok and type(r)=="string" and #r>0 then return r end end
     return nil
 end
+
+-- ============ Server hop (sem crash: pcall + wait entre tentativas) ============
 local function pool()
     local raw=httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId))
     if not raw then return {} end
@@ -673,42 +673,47 @@ local function pool()
     return t
 end
 
-local hopInitFailedConn
 local function hop()
     if C.IsHopping then return false end
     C.IsHopping=true
-    C.HopStatus="queue"
-    queueReexec()
+    C.IsTeleporting=true
 
+    -- 1. Enfileira ANTES de qualquer coisa (payload pequeno)
+    C.HopStatus="queue"
+    local queued = queueReexec()
+
+    -- 2. Busca servidores
     C.HopStatus="fetch"
     local list=pool()
-    if #list==0 then C.HopStatus="no servers"; C.IsHopping=false; return false end
-
-    if not hopInitFailedConn then
-        hopInitFailedConn = TeleportService.TeleportInitFailed:Connect(function() end)
+    if #list==0 then
+        C.HopStatus="no servers"
+        C.IsHopping=false; C.IsTeleporting=false
+        return false
     end
 
-    C.IsTeleporting=true
+    -- 3. Tenta cada servidor com pcall + delay de 0.5s (evita crash loop)
     for i,s in ipairs(list) do
-        C.HopStatus="try "..i.."/"..#list
+        C.HopStatus=string.format("try %d/%d", i, #list)
         local ok,res=pcall(function()
             local o=Instance.new("TeleportOptions")
             o.ServerInstanceId=s.id
             return TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer, o)
         end)
         if ok and not (typeof(res)=="EnumItem" and res==Enum.TeleportState.Failed) then
-            C.HopStatus="OK"
-            task.wait(5)
-            C.IsTeleporting=false; C.IsHopping=false
+            C.HopStatus="OK"..(queued and "" or " (sem reexec)")
+            task.wait(4) -- aguarda o teleporte iniciar antes de liberar guarda
+            C.IsHopping=false; C.IsTeleporting=false
             return true
         end
-        task.wait(0.4)
+        task.wait(0.5) -- delay entre tentativas (crítico para não crashar)
     end
+
+    -- 4. Fallback: Teleport(PlaceId)
     C.HopStatus="fallback"
     local ok=pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-    task.wait(4)
-    C.IsTeleporting=false; C.IsHopping=false
-    C.HopStatus = ok and "fallback OK" or "FAILED"
+    task.wait(3)
+    C.IsHopping=false; C.IsTeleporting=false
+    C.HopStatus = ok and ("fallback OK"..(queued and "" or " (sem reexec)")) or "FAILED"
     return ok
 end
 
@@ -822,7 +827,7 @@ local function startVote()
 end
 local function stopVote() C.VoteMode=0; if C.VoteThread then task.cancel(C.VoteThread); C.VoteThread=nil end end
 
--- ============ ESP (full rewrite) ============
+-- ============ ESP ============
 local ROLE_COLORS = {
     Murderer=Color3.fromRGB(255,40,40),
     Sheriff=Color3.fromRGB(40,140,255),
@@ -839,7 +844,6 @@ local hasDrawing = (function()
 end)
 
 local ESP = { draws={}, smooth={}, highlights={}, coinSels={}, gunSels={} }
-local roleCache = { data=nil, ts=0 }
 local function roleFor(p)
     local d=PD()
     if d and d[p.Name] and d[p.Name].Role and d[p.Name].Role~="None" then return d[p.Name].Role end
@@ -871,19 +875,13 @@ local function updateESP()
         return
     end
     local cam=workspace.CurrentCamera; if not cam then return end
-
-    -- Tracer origin: local character HRP
-    local lh=HRP()
-    local lu=HUM()
+    local lh=HRP(); local lu=HUM()
     local origin
     if lh and lu and lu.Health>0 then
         local sp,on=cam:WorldToViewportPoint(lh.Position)
         if on then origin=Vector2.new(sp.X, sp.Y) end
     end
-    if not origin then
-        local vs=cam.ViewportSize
-        origin=Vector2.new(vs.X/2, vs.Y)
-    end
+    if not origin then local vs=cam.ViewportSize; origin=Vector2.new(vs.X/2, vs.Y) end
 
     for _,p in ipairs(Players:GetPlayers()) do
         if p==LocalPlayer then continue end
@@ -897,13 +895,11 @@ local function updateESP()
         if not roleShown(r) then hideAll(t) continue end
         local col=ROLE_COLORS[r] or ROLE_COLORS.Unknown
 
-        -- Use HRP only — stable, no head bobbing
         local top,on1 = cam:WorldToViewportPoint(hp.Position + Vector3.new(0, 2.6, 0))
         local bot,on2 = cam:WorldToViewportPoint(hp.Position - Vector3.new(0, 2.8, 0))
         if not (on1 and on2) then hideAll(t) continue end
         if math.abs(top.Y-bot.Y)<2 then hideAll(t) continue end
 
-        -- Target for lerp
         local h = math.abs(top.Y-bot.Y)
         local w = h/1.8
         local targetPos = Vector2.new(top.X - w/2, top.Y)
@@ -919,30 +915,15 @@ local function updateESP()
         s.tracerTo = s.tracerTo:Lerp(targetTracerTo, 0.5)
 
         if C.ESPOn then
-            if t.box then
-                t.box.Position=s.pos
-                t.box.Size=s.size
-                t.box.Color=col
-                t.box.Visible=true
-            end
-            if t.name then
-                t.name.Text=p.Name.." ["..r.."]"
-                t.name.Position=Vector2.new(top.X, s.pos.Y-18)
-                t.name.Color=col
-                t.name.Visible=true
-            end
+            if t.box then t.box.Position=s.pos; t.box.Size=s.size; t.box.Color=col; t.box.Visible=true end
+            if t.name then t.name.Text=p.Name.." ["..r.."]"; t.name.Position=Vector2.new(top.X, s.pos.Y-18); t.name.Color=col; t.name.Visible=true end
         else
             if t.box then t.box.Visible=false end
             if t.name then t.name.Visible=false end
         end
         if C.TracersOn and t.tracer then
-            t.tracer.From=origin
-            t.tracer.To=s.tracerTo
-            t.tracer.Color=col
-            t.tracer.Visible=true
-        elseif t.tracer then
-            t.tracer.Visible=false
-        end
+            t.tracer.From=origin; t.tracer.To=s.tracerTo; t.tracer.Color=col; t.tracer.Visible=true
+        elseif t.tracer then t.tracer.Visible=false end
     end
 end
 
@@ -951,36 +932,24 @@ RunService.RenderStepped:Connect(function()
     pcall(updateESP)
 end)
 
--- Highlights + coin/gun SelectionBoxes (heartbeat 5 Hz)
-local hlConn
 local hlAccum=0
-hlConn = RunService.Heartbeat:Connect(function(dt)
+RunService.Heartbeat:Connect(function(dt)
     if not (C.ChamsOn or C.OutlinesOn or C.CoinESP or C.GunESP) then return end
     hlAccum += dt
     if hlAccum<0.2 then return end
     hlAccum=0
 
-    -- Player highlights
     if C.ChamsOn or C.OutlinesOn then
         for _,p in ipairs(Players:GetPlayers()) do
             if p==LocalPlayer then continue end
             local ch=p.Character
             local hl=ESP.highlights[p]
-            if not ch then
-                if hl then pcall(function() hl:Destroy() end); ESP.highlights[p]=nil end
-                continue
-            end
+            if not ch then if hl then pcall(function() hl:Destroy() end); ESP.highlights[p]=nil end; continue end
             local r=roleFor(p)
-            if not roleShown(r) then
-                if hl then pcall(function() hl:Destroy() end); ESP.highlights[p]=nil end
-                continue
-            end
+            if not roleShown(r) then if hl then pcall(function() hl:Destroy() end); ESP.highlights[p]=nil end; continue end
             if not hl or hl.Parent~=ch then
                 if hl then pcall(function() hl:Destroy() end) end
-                hl=Instance.new("Highlight")
-                hl.Name="LAMBDA_HL"
-                hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
-                hl.Parent=ch
+                hl=Instance.new("Highlight"); hl.Name="LAMBDA_HL"; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=ch
                 ESP.highlights[p]=hl
             end
             local col=ROLE_COLORS[r] or ROLE_COLORS.Unknown
@@ -993,7 +962,6 @@ hlConn = RunService.Heartbeat:Connect(function(dt)
         ESP.highlights={}
     end
 
-    -- Coin ESP via SelectionBox
     if C.CoinESP then
         local seen={}
         for _,coin in ipairs(getCoins()) do
@@ -1001,29 +969,20 @@ hlConn = RunService.Heartbeat:Connect(function(dt)
             local sb=ESP.coinSels[coin]
             if not sb or sb.Parent~=coin then
                 if sb then pcall(function() sb:Destroy() end) end
-                local s=Instance.new("SelectionBox")
-                s.Adornee=coin
-                s.Color3=COIN_COL
-                s.LineThickness=0.06
-                s.SurfaceTransparency=1
-                s.Parent=coin
+                local s=Instance.new("SelectionBox"); s.Adornee=coin; s.Color3=COIN_COL; s.LineThickness=0.06; s.SurfaceTransparency=1; s.Parent=coin
                 ESP.coinSels[coin]=s
             end
         end
-        for part,sb in pairs(ESP.coinSels) do
-            if not seen[part] or not part.Parent then pcall(function() sb:Destroy() end); ESP.coinSels[part]=nil end
-        end
+        for part,sb in pairs(ESP.coinSels) do if not seen[part] or not part.Parent then pcall(function() sb:Destroy() end); ESP.coinSels[part]=nil end end
     else
         for _,sb in pairs(ESP.coinSels) do pcall(function() sb:Destroy() end) end
         ESP.coinSels={}
     end
 
-    -- Gun ESP via SelectionBox on Handle
     if C.GunESP then
         local seen={}
         for _,o in ipairs(Workspace:GetChildren()) do
-            local isGun = o:IsA("Tool") and (o.Name=="Gun" or o.Name=="Revolver")
-            if not isGun and o:IsA("Model") and (o.Name=="Gun" or o.Name=="Revolver") then isGun=true end
+            local isGun = (o:IsA("Tool") or o:IsA("Model")) and (o.Name=="Gun" or o.Name=="Revolver")
             if isGun and not Players:GetPlayerFromCharacter(o.Parent) then
                 local handle = o:FindFirstChild("Handle") or (o:IsA("Model") and o.PrimaryPart) or o:FindFirstChildWhichIsA("BasePart")
                 if handle then
@@ -1031,20 +990,13 @@ hlConn = RunService.Heartbeat:Connect(function(dt)
                     local sb=ESP.gunSels[handle]
                     if not sb or sb.Parent~=handle then
                         if sb then pcall(function() sb:Destroy() end) end
-                        local s=Instance.new("SelectionBox")
-                        s.Adornee=handle
-                        s.Color3=GUN_COL
-                        s.LineThickness=0.08
-                        s.SurfaceTransparency=1
-                        s.Parent=handle
+                        local s=Instance.new("SelectionBox"); s.Adornee=handle; s.Color3=GUN_COL; s.LineThickness=0.08; s.SurfaceTransparency=1; s.Parent=handle
                         ESP.gunSels[handle]=s
                     end
                 end
             end
         end
-        for part,sb in pairs(ESP.gunSels) do
-            if not seen[part] or not part.Parent then pcall(function() sb:Destroy() end); ESP.gunSels[part]=nil end
-        end
+        for part,sb in pairs(ESP.gunSels) do if not seen[part] or not part.Parent then pcall(function() sb:Destroy() end); ESP.gunSels[part]=nil end end
     else
         for _,sb in pairs(ESP.gunSels) do pcall(function() sb:Destroy() end) end
         ESP.gunSels={}
@@ -1070,39 +1022,33 @@ local MAIN_GUI
 
 local function buildGui()
     if MAIN_GUI then pcall(function() MAIN_GUI:Destroy() end) end
-    local parent=guiParent()
-    if not parent then warn("[Lambda] Sem parent GUI"); return end
+    local parent=guiParent(); if not parent then return end
     local gui=Instance.new("ScreenGui")
     gui.Name="LambdaHub"; gui.ResetOnSpawn=false; gui.IgnoreGuiInset=true; gui.DisplayOrder=999999
     pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
-    gui.Parent=parent
-    MAIN_GUI=gui
+    gui.Parent=parent; MAIN_GUI=gui
 
     local main=Instance.new("Frame")
     main.Size=UDim2.new(0,380,0,510); main.Position=UDim2.new(0,30,0,30)
-    main.BackgroundColor3=SECONDARY; main.BorderSizePixel=0; main.Active=true; main.Draggable=true
-    main.Parent=gui
+    main.BackgroundColor3=SECONDARY; main.BorderSizePixel=0; main.Active=true; main.Draggable=true; main.Parent=gui
 
     local titleBar=Instance.new("Frame")
-    titleBar.Size=UDim2.new(1,0,0,28); titleBar.BackgroundColor3=SECONDARY
-    titleBar.BorderSizePixel=0; titleBar.Parent=main
+    titleBar.Size=UDim2.new(1,0,0,28); titleBar.BackgroundColor3=SECONDARY; titleBar.BorderSizePixel=0; titleBar.Parent=main
 
     local title=Instance.new("TextLabel")
     title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0)
-    title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.21"
+    title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.22"
     title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13
     title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
 
     local min=Instance.new("TextButton")
     min.Size=UDim2.new(0,24,0,20); min.Position=UDim2.new(1,-56,0,4)
-    min.BackgroundColor3=Color3.fromRGB(70,70,70); min.Text="—"
-    min.TextColor3=Color3.fromRGB(255,255,255); min.Font=Enum.Font.GothamBold; min.TextSize=13
-    min.Parent=titleBar
+    min.BackgroundColor3=Color3.fromRGB(70,70,70); min.Text="—"; min.TextColor3=Color3.fromRGB(255,255,255)
+    min.Font=Enum.Font.GothamBold; min.TextSize=13; min.Parent=titleBar
     local close=Instance.new("TextButton")
     close.Size=UDim2.new(0,24,0,20); close.Position=UDim2.new(1,-28,0,4)
-    close.BackgroundColor3=Color3.fromRGB(120,30,30); close.Text="X"
-    close.TextColor3=Color3.fromRGB(255,255,255); close.Font=Enum.Font.GothamBold; close.TextSize=13
-    close.Parent=titleBar
+    close.BackgroundColor3=Color3.fromRGB(120,30,30); close.Text="X"; close.TextColor3=Color3.fromRGB(255,255,255)
+    close.Font=Enum.Font.GothamBold; close.TextSize=13; close.Parent=titleBar
 
     local collapsed=false
     min.MouseButton1Click:Connect(function()
@@ -1132,23 +1078,18 @@ local function buildGui()
     local function newTab(name, wPct)
         local b=Instance.new("TextButton")
         b.Size=UDim2.new(wPct,0,1,0); b.BackgroundColor3=SECONDARY
-        b.Text=name; b.TextColor3=TEXT_DIM; b.Font=Enum.Font.GothamBold; b.TextSize=11
-        b.Parent=tabBar
+        b.Text=name; b.TextColor3=TEXT_DIM; b.Font=Enum.Font.GothamBold; b.TextSize=11; b.Parent=tabBar
         local f=Instance.new("ScrollingFrame")
-        f.Size=UDim2.new(1,0,1,0); f.BackgroundTransparency=1
-        f.ScrollBarThickness=4; f.CanvasSize=UDim2.new(0,0,0,0); f.Visible=false; f.Parent=content
-        local l=Instance.new("UIListLayout")
-        l.Padding=UDim.new(0,4); l.SortOrder=Enum.SortOrder.LayoutOrder; l.Parent=f
-        local p=Instance.new("UIPadding")
-        p.PaddingTop=UDim.new(0,8); p.PaddingLeft=UDim.new(0,8); p.PaddingRight=UDim.new(0,8); p.Parent=f
+        f.Size=UDim2.new(1,0,1,0); f.BackgroundTransparency=1; f.ScrollBarThickness=4
+        f.CanvasSize=UDim2.new(0,0,0,0); f.Visible=false; f.Parent=content
+        local l=Instance.new("UIListLayout"); l.Padding=UDim.new(0,4); l.SortOrder=Enum.SortOrder.LayoutOrder; l.Parent=f
+        local p=Instance.new("UIPadding"); p.PaddingTop=UDim.new(0,8); p.PaddingLeft=UDim.new(0,8); p.PaddingRight=UDim.new(0,8); p.Parent=f
         tabs[name]={btn=b, frame=f, list=l}
         l:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
             f.CanvasSize=UDim2.new(0,0,0,l.AbsoluteContentSize.Y+16)
         end)
         b.MouseButton1Click:Connect(function()
-            for _,t in pairs(tabs) do
-                t.frame.Visible=false; t.btn.BackgroundColor3=SECONDARY; t.btn.TextColor3=TEXT_DIM
-            end
+            for _,t in pairs(tabs) do t.frame.Visible=false; t.btn.BackgroundColor3=SECONDARY; t.btn.TextColor3=TEXT_DIM end
             f.Visible=true; b.BackgroundColor3=PRIMARY; b.TextColor3=Color3.fromRGB(0,0,0)
         end)
         return f
@@ -1166,74 +1107,49 @@ local function buildGui()
         local l=Instance.new("TextLabel")
         l.Size=UDim2.new(1,0,0,16); l.BackgroundTransparency=1
         l.Text=txt; l.TextColor3=TEXT_DIM; l.Font=Enum.Font.Gotham; l.TextSize=10
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.LayoutOrder=ord; l.Parent=par
-        return l
+        l.TextXAlignment=Enum.TextXAlignment.Left; l.LayoutOrder=ord; l.Parent=par; return l
     end
     local function tog(par,txt,init,ord,cb)
-        local row=Instance.new("Frame")
-        row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel")
-        l.Size=UDim2.new(1,-60,1,0); l.BackgroundTransparency=1
-        l.Text=txt; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=12
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
-        local b=Instance.new("TextButton")
-        b.Size=UDim2.new(0,48,0,20); b.Position=UDim2.new(1,-52,0.5,-10)
-        b.BackgroundColor3=init and PRIMARY or Color3.fromRGB(55,55,55)
-        b.Text=init and "ON" or "OFF"
+        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-60,1,0); l.BackgroundTransparency=1
+        l.Text=txt; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=12; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
+        local b=Instance.new("TextButton"); b.Size=UDim2.new(0,48,0,20); b.Position=UDim2.new(1,-52,0.5,-10)
+        b.BackgroundColor3=init and PRIMARY or Color3.fromRGB(55,55,55); b.Text=init and "ON" or "OFF"
         b.TextColor3=init and Color3.fromRGB(0,0,0) or Color3.fromRGB(255,255,255)
         b.Font=Enum.Font.GothamBold; b.TextSize=10; b.Parent=row
         local st=init
         b.MouseButton1Click:Connect(function()
-            st=not st
-            b.BackgroundColor3=st and PRIMARY or Color3.fromRGB(55,55,55)
-            b.Text=st and "ON" or "OFF"
-            b.TextColor3=st and Color3.fromRGB(0,0,0) or Color3.fromRGB(255,255,255)
+            st=not st; b.BackgroundColor3=st and PRIMARY or Color3.fromRGB(55,55,55)
+            b.Text=st and "ON" or "OFF"; b.TextColor3=st and Color3.fromRGB(0,0,0) or Color3.fromRGB(255,255,255)
             pcall(function() cb(st) end); save()
         end)
     end
     local function inp(par,label,val,ord,cb)
-        local row=Instance.new("Frame")
-        row.Size=UDim2.new(1,0,0,24); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel")
-        l.Size=UDim2.new(1,-80,1,0); l.BackgroundTransparency=1
-        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
-        local b=Instance.new("TextBox")
-        b.Size=UDim2.new(0,72,0,20); b.Position=UDim2.new(1,-76,0.5,-10)
-        b.BackgroundColor3=Color3.fromRGB(45,45,45)
-        b.TextColor3=Color3.fromRGB(255,255,255); b.Text=tostring(val)
+        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,24); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-80,1,0); l.BackgroundTransparency=1
+        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
+        local b=Instance.new("TextBox"); b.Size=UDim2.new(0,72,0,20); b.Position=UDim2.new(1,-76,0.5,-10)
+        b.BackgroundColor3=Color3.fromRGB(45,45,45); b.TextColor3=Color3.fromRGB(255,255,255); b.Text=tostring(val)
         b.Font=Enum.Font.Gotham; b.TextSize=11; b.Parent=row
         b.FocusLost:Connect(function() pcall(function() cb(b.Text) end); save() end)
     end
     local function wide(par,label,val,ord,cb)
-        local col=Instance.new("Frame")
-        col.Size=UDim2.new(1,0,0,44); col.BackgroundTransparency=1; col.LayoutOrder=ord; col.Parent=par
-        local l=Instance.new("TextLabel")
-        l.Size=UDim2.new(1,0,0,14); l.BackgroundTransparency=1
-        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=col
-        local b=Instance.new("TextBox")
-        b.Size=UDim2.new(1,0,0,24); b.Position=UDim2.new(0,0,0,16)
-        b.BackgroundColor3=Color3.fromRGB(45,45,45)
-        b.TextColor3=Color3.fromRGB(255,255,255); b.Text=tostring(val)
+        local col=Instance.new("Frame"); col.Size=UDim2.new(1,0,0,44); col.BackgroundTransparency=1; col.LayoutOrder=ord; col.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,0,0,14); l.BackgroundTransparency=1
+        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=col
+        local b=Instance.new("TextBox"); b.Size=UDim2.new(1,0,0,24); b.Position=UDim2.new(0,0,0,16)
+        b.BackgroundColor3=Color3.fromRGB(45,45,45); b.TextColor3=Color3.fromRGB(255,255,255); b.Text=tostring(val)
         b.Font=Enum.Font.Gotham; b.TextSize=10; b.Parent=col
         b.FocusLost:Connect(function() pcall(function() cb(b.Text) end); save() end)
     end
     local function cyc(par,label,opts,init,ord,cb)
-        local row=Instance.new("Frame")
-        row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel")
-        l.Size=UDim2.new(1,-130,1,0); l.BackgroundTransparency=1
-        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
-        local b=Instance.new("TextButton")
-        b.Size=UDim2.new(0,120,0,20); b.Position=UDim2.new(1,-124,0.5,-10)
-        b.BackgroundColor3=Color3.fromRGB(55,55,55)
-        b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.Gotham; b.TextSize=11; b.Parent=row
+        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-130,1,0); l.BackgroundTransparency=1
+        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
+        local b=Instance.new("TextButton"); b.Size=UDim2.new(0,120,0,20); b.Position=UDim2.new(1,-124,0.5,-10)
+        b.BackgroundColor3=Color3.fromRGB(55,55,55); b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.Gotham; b.TextSize=11; b.Parent=row
         local i=findIdx(opts,init); b.Text=opts[i]
-        b.MouseButton1Click:Connect(function()
-            i=i%#opts+1; b.Text=opts[i]; pcall(function() cb(opts[i]) end); save()
-        end)
+        b.MouseButton1Click:Connect(function() i=i%#opts+1; b.Text=opts[i]; pcall(function() cb(opts[i]) end); save() end)
     end
 
     local o=0
@@ -1248,20 +1164,18 @@ local function buildGui()
     inp(mainTab,"Stealth depth",C.Depth,no(),function(v) local n=tonumber(v); if n then C.Depth=math.clamp(n,5,50) end end)
     inp(mainTab,"Coin rise height",C.CoinRise,no(),function(v) local n=tonumber(v); if n then C.CoinRise=math.clamp(n,1,20) end end)
     lbl(mainTab,"— Bag —",no())
-    inp(mainTab,"Threshold (0=auto)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
+    inp(mainTab,"Threshold (0=auto, 50=default)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
     local stats=Instance.new("TextLabel")
-    stats.Size=UDim2.new(1,0,0,72); stats.BackgroundColor3=Color3.fromRGB(30,28,0)
-    stats.BorderSizePixel=0; stats.TextColor3=PRIMARY; stats.Font=Enum.Font.Code; stats.TextSize=10
-    stats.Text="Collected: 0\nPer hour: 0\nBag: ?/40\nFails: 0\nStatus: idle"
+    stats.Size=UDim2.new(1,0,0,72); stats.BackgroundColor3=Color3.fromRGB(30,28,0); stats.BorderSizePixel=0
+    stats.TextColor3=PRIMARY; stats.Font=Enum.Font.Code; stats.TextSize=10
+    stats.Text="Collected: 0\nPer hour: 0\nBag: ?/50\nFails: 0\nStatus: idle"
     stats.LayoutOrder=no(); stats.Parent=mainTab
     task.spawn(function()
         while stats.Parent do
             task.wait(0.5)
             local b=statValue()
             stats.Text=string.format("Collected: %d\nPer hour: %d\nBag: %s/%d\nFails: %d\nStatus: %s",
-                C.Stats.Total, rate(),
-                b and tostring(b) or "?", threshold(),
-                C.CollectFails, C.FarmStatus or "idle")
+                C.Stats.Total, rate(), b and tostring(b) or "?", threshold(), C.CollectFails, C.FarmStatus or "idle")
         end
     end)
 
@@ -1302,18 +1216,15 @@ local function buildGui()
     tog(espTab,"Dropped Gun ESP",C.GunESP,no(),function(s) C.GunESP=s end)
 
     o=0
-    wide(serverTab,"Reexec URL (raw GitHub)",C.ReexecURL,no(),function(v) C.ReexecURL=v end)
+    wide(serverTab,"Reexec URL (raw GitHub, obrigatório p/ hop)",C.ReexecURL,no(),function(v) C.ReexecURL=v end)
     inp(serverTab,"Hop if players >",C.HopAt,no(),function(v) local n=tonumber(v); if n then C.HopAt=n end end)
     tog(serverTab,"Hop when friend joins",C.HopFriend,no(),function(s) C.HopFriend=s; if s then friendMonitor() end end)
     local hopLbl=Instance.new("TextLabel")
-    hopLbl.Size=UDim2.new(1,0,0,24); hopLbl.BackgroundColor3=Color3.fromRGB(28,28,28)
-    hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=10
+    hopLbl.Size=UDim2.new(1,0,0,24); hopLbl.BackgroundColor3=Color3.fromRGB(28,28,28); hopLbl.BorderSizePixel=0
+    hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=10
     hopLbl.Text="Hop: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab
     task.spawn(function()
-        while hopLbl.Parent do
-            task.wait(0.5)
-            hopLbl.Text="Hop: "..(C.HopStatus~="" and C.HopStatus or "idle")
-        end
+        while hopLbl.Parent do task.wait(0.5); hopLbl.Text="Hop: "..(C.HopStatus~="" and C.HopStatus or "idle") end
     end)
 
     o=0
@@ -1328,12 +1239,10 @@ local function buildGui()
 
     o=0
     wide(themeTab,"Primary color (hex)",C.PrimaryColor,no(),function(v)
-        C.PrimaryColor=v
-        local c=parseHex(v); if c then PRIMARY=c; buildGui() end
+        C.PrimaryColor=v; local c=parseHex(v); if c then PRIMARY=c; buildGui() end
     end)
     wide(themeTab,"Secondary color (hex)",C.SecondaryColor,no(),function(v)
-        C.SecondaryColor=v
-        local c=parseHex(v); if c then SECONDARY=c; buildGui() end
+        C.SecondaryColor=v; local c=parseHex(v); if c then SECONDARY=c; buildGui() end
     end)
     local pvBtn=Instance.new("TextButton")
     pvBtn.Size=UDim2.new(1,0,0,30); pvBtn.BackgroundColor3=PRIMARY
@@ -1371,6 +1280,6 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[Lambda] v0.21 ready | HWID: "..HWID)
+print("[Lambda] v0.22 ready | HWID: "..HWID)
 if C.ReexecURL~="" then print("[Lambda] Reexec URL: "..C.ReexecURL)
-else warn("[Lambda] Reexec URL vazio — preencha na aba Server para reexecutar após hop") end
+else warn("[Lambda] Reexec URL vazio — hop sem reexec. Preencha na aba Server.") end
