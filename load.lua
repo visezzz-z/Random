@@ -1,7 +1,7 @@
--- ASCRON | MM2 AutoFarm v18
--- Fix: unanchor on round end | Tracer origin fixed | Multi-executor reexecution
+-- ASCRON | MM2 AutoFarm v19
+-- Fix: isInActiveRound barato | Position-jump unanchor | Transition-based watcher
 
-print("[ASCRON] === v18 loading ===")
+print("[ASCRON] === v19 loading ===")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -69,6 +69,7 @@ local savedPrefs = Prefs.load()
 if savedPrefs then for k, v in pairs(savedPrefs) do if C[k] ~= nil then C[k] = v end end end
 
 C.Farming = false
+C.FarmStatus = "idle"
 C.FarmThread = nil
 C.HopThread, C.FriendThread, C.VoteThread, C.AntiMurdererThread = nil, nil, nil, nil
 C.LastFullAction = 0
@@ -98,22 +99,24 @@ local function getPlayerData()
     return pdCache.data
 end
 
--- ===================== ROUND STATE =====================
--- Retorna false se o jogador está morto, no lobby, ou sem papel.
--- Também verifica se o container de moedas existe no mapa.
+-- ===================== ROUND STATE (barato, sem container scan) =====================
 local function isInActiveRound()
     local data = getPlayerData()
-    if data then
-        local me = data[LocalPlayer.Name]
-        if me then
-            if me.Dead == true or me.Killed == true then return false end
-            if me.Role == "None" then return false end
-        end
-    end
-    -- Se não há container de moeda no mapa, não há rodada ativa
-    local containers = getCurrencyContainers()
-    if #containers == 0 then return false end
+    if not data then return true end
+    local me = data[LocalPlayer.Name]
+    if not me then return true end
+    if me.Dead == true or me.Killed == true then return false end
+    if me.Role == "None" then return false end
     return true
+end
+
+local function unanchorIfNeeded()
+    local hrp = getHRP()
+    if hrp and hrp.Anchored then
+        pcall(function() hrp.Anchored = false end)
+        local hum = getHum()
+        if hum then hum.PlatformStand = false; hum.AutoRotate = true end
+    end
 end
 
 -- ===================== BAG =====================
@@ -355,16 +358,25 @@ local function travelTo(targetPos, rotate90, speed, coinRef)
     local rotation = rotate90 and LAY_ROTATION or hrp.CFrame.Rotation
     local lastTime = tick()
     local startTime = tick()
-    local maxTravelTime = 15 -- segurança: máximo 15 segundos por moeda
+    local maxTravelTime = 15
+    local previousPos = hrp.Position
+
     while C.Farming do
-        -- Aborta se rodada acabou, personagem morreu, ou moeda sumiu
-        if not isInActiveRound() then return false end
         local h = getHRP()
         if not h or not h.Anchored then return false end
         if coinRef and not coinRef.Parent then return false end
         local curHum = getHum()
         if not curHum or curHum.Health <= 0 then return false end
         if tick() - startTime > maxTravelTime then return false end
+
+        -- Detecta teleporte externo: se entre frames a posição mudou muito além
+        -- do que conseguimos mover (speed * dt max ~3 studs), o servidor nos moveu
+        -- (fim de rodada, kick para lobby). Aborta imediatamente.
+        local currentPos = h.Position
+        if (currentPos - previousPos).Magnitude > 15 then
+            return false
+        end
+
         local delta = targetPos - h.Position
         local dist = delta.Magnitude
         if dist < 2.5 then
@@ -375,7 +387,9 @@ local function travelTo(targetPos, rotate90, speed, coinRef)
         local dt = math.min(now - lastTime, 0.05)
         lastTime = now
         local step = math.min(speed * dt, dist)
-        h.CFrame = CFrame.new(h.Position + delta.Unit * step) * rotation
+        local newPos = h.Position + delta.Unit * step
+        h.CFrame = CFrame.new(newPos) * rotation
+        previousPos = newPos
         task.wait()
     end
     return false
@@ -530,37 +544,21 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
--- ===================== ROUND END WATCHER =====================
--- Desancora imediatamente quando a rodada termina, para evitar que o
--- servidor teleporte o HRP ancorado e o personagem "voe".
-task.spawn(function()
-    while true do
-        task.wait(0.2)
-        if not C.Farming then continue end
-        if isInActiveRound() then continue end
-        -- Rodada acabou: desancora e solta o personagem
-        local hrp = getHRP()
-        if hrp and hrp.Anchored then
-            pcall(function() hrp.Anchored = false end)
-            local hum = getHum()
-            if hum then
-                hum.PlatformStand = false
-                hum.AutoRotate = true
-            end
-        end
-    end
-end)
-
 -- ===================== FARM LOOP =====================
 local function startFarm()
     if C.Farming then return end
     C.Farming = true
+    C.FarmStatus = "starting"
     C.FarmThread = task.spawn(function()
         while C.Farming do
             local hum = getHum()
-            if not hum or hum.Health <= 0 or not isInActiveRound() then
-                local hrp = getHRP()
-                if hrp and hrp.Anchored then endFarmMovement() end
+            if not hum or hum.Health <= 0 then
+                C.FarmStatus = "dead"
+                unanchorIfNeeded()
+                task.wait(0.4)
+            elseif not isInActiveRound() then
+                C.FarmStatus = "waiting for round"
+                unanchorIfNeeded()
                 task.wait(0.4)
             else
                 local coin = findNearestCoin()
@@ -568,37 +566,76 @@ local function startFarm()
                     local hrp = getHRP()
                     if hrp then
                         if not hrp.Anchored then beginFarmMovement(); task.wait(0.1) end
+                        C.FarmStatus = "traveling"
                         local rotate90 = (C.FarmMode == "Lay")
                         local arrived = travelTo(coin.Position, rotate90, C.FarmSpeed, coin)
                         if arrived and coin.Parent then
+                            C.FarmStatus = "collecting"
                             collect(coin)
                             local t = tick()
                             while coin.Parent and tick() - t < 0.5 do task.wait(0.02) end
                             if coin.Parent then C.CollectFails += 1 else C.CollectFails = 0 end
+                        elseif not coin.Parent then
+                            C.FarmStatus = "coin vanished"
+                        elseif not isInActiveRound() then
+                            C.FarmStatus = "round ended"
+                            unanchorIfNeeded()
+                        else
+                            C.FarmStatus = "travel aborted"
                         end
                         task.wait(0.05)
                     end
                 else
-                    local hrp = getHRP()
-                    if hrp and hrp.Anchored then endFarmMovement() end
+                    C.FarmStatus = "no coins"
+                    unanchorIfNeeded()
                     task.wait(0.3)
                 end
                 local st = getStatValue()
                 if st and st >= getBagThreshold() and tick() - C.LastFullAction > 3 then
                     C.LastFullAction = tick()
+                    C.FarmStatus = "bag full action"
                     handleFullBag()
                 end
             end
         end
+        C.FarmStatus = "idle"
     end)
 end
 local function stopFarm()
     C.Farming = false
+    C.FarmStatus = "idle"
     if C.FarmThread then task.cancel(C.FarmThread); C.FarmThread = nil end
     endFarmMovement()
 end
 
--- ===================== SOURCE + REEXEC (multi-executor) =====================
+-- ===================== ROUND END WATCHER (transição) =====================
+task.spawn(function()
+    local wasInRound = false
+    local notInRoundCount = 0
+    while true do
+        task.wait(0.15)
+        if not C.Farming then
+            wasInRound = false
+            notInRoundCount = 0
+        else
+            local nowInRound = isInActiveRound()
+            if nowInRound then
+                wasInRound = true
+                notInRoundCount = 0
+            elseif wasInRound then
+                notInRoundCount += 1
+                if notInRoundCount >= 2 then
+                    -- Confirmado duas vezes: rodada acabou
+                    unanchorIfNeeded()
+                    wasInRound = false
+                    notInRoundCount = 0
+                end
+            end
+        end
+    end
+end)
+
+-- ===================== SOURCE + REEXEC =====================
 local function captureSource()
     if getgenv().ASCRON_SOURCE then return true end
     local env = getgenv()
@@ -660,53 +697,23 @@ local function queueForReexecution()
     end
     local write = type(writefile) == "function" and writefile or getgenv().writefile
     if write then pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE) end
-
-    -- Loader pequeno: lê o arquivo e executa. Cabe no limite de qualquer executor.
     local loader = "pcall(function() local s = readfile('" .. SOURCE_FILE .. "'); if s and #s > 100 then loadstring(s)() end end)"
-
-    -- 1. syn.queue_on_teleport (Synapse, Delta, Arceus X frequentemente expõem syn)
     if syn and type(syn.queue_on_teleport) == "function" then
-        if pcall(syn.queue_on_teleport, loader) then
-            print("[ASCRON] Reexec: syn.queue_on_teleport (loader)")
-            return true
-        end
-        if pcall(syn.queue_on_teleport, getgenv().ASCRON_SOURCE) then
-            print("[ASCRON] Reexec: syn.queue_on_teleport (full)")
-            return true
-        end
+        if pcall(syn.queue_on_teleport, loader) then print("[ASCRON] Reexec: syn"); return true end
+        if pcall(syn.queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: syn(full)"); return true end
     end
-
-    -- 2. queue_on_teleport global (Xeno, Solara, Potassium, e muitos outros)
     if type(queue_on_teleport) == "function" then
-        if pcall(queue_on_teleport, loader) then
-            print("[ASCRON] Reexec: queue_on_teleport (loader)")
-            return true
-        end
-        if pcall(queue_on_teleport, getgenv().ASCRON_SOURCE) then
-            print("[ASCRON] Reexec: queue_on_teleport (full)")
-            return true
-        end
+        if pcall(queue_on_teleport, loader) then print("[ASCRON] Reexec: global"); return true end
+        if pcall(queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: global(full)"); return true end
     end
-
-    -- 3. getgenv().queue_on_teleport (alguns executores móveis injetam aqui)
     local g = getgenv()
     if g and type(g.queue_on_teleport) == "function" then
-        if pcall(g.queue_on_teleport, loader) then
-            print("[ASCRON] Reexec: getgenv().queue_on_teleport")
-            return true
-        end
+        if pcall(g.queue_on_teleport, loader) then print("[ASCRON] Reexec: getgenv"); return true end
     end
-
-    -- 4. queueonteleport (variante sem underscore, vista em Solara antigo)
     if type(queueonteleport) == "function" then
-        if pcall(queueonteleport, loader) then
-            print("[ASCRON] Reexec: queueonteleport")
-            return true
-        end
+        if pcall(queueonteleport, loader) then print("[ASCRON] Reexec: queueonteleport"); return true end
     end
-
-    warn("[ASCRON] Reexec: nenhum método de queue disponível neste executor.")
-    warn("[ASCRON] Ative Auto-Execute no executor e aponte para " .. SOURCE_FILE)
+    warn("[ASCRON] Reexec: nenhum método disponível. Ative Auto-Execute para " .. SOURCE_FILE)
     return false
 end
 
@@ -743,9 +750,9 @@ local function getServerPool()
 end
 
 local function tryTeleport(serverId)
-    local failed, failReason = false, nil
-    local conn = TeleportService.TeleportInitFailed:Connect(function(plr, _, reason)
-        if plr == LocalPlayer then failed = true; failReason = reason end
+    local failed = false
+    local conn = TeleportService.TeleportInitFailed:Connect(function(plr)
+        if plr == LocalPlayer then failed = true end
     end)
     local ok, result = pcall(function()
         local opts = Instance.new("TeleportOptions")
@@ -967,7 +974,6 @@ local function updatePlayerESP()
         return "Innocent"
     end
     local screenSize = cam.ViewportSize
-    -- Origem fixa do tracer: centro inferior da tela
     local tracerOrigin = Vector2.new(screenSize.X / 2, screenSize.Y)
     for _, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
@@ -1119,7 +1125,6 @@ local function updateHighlights()
     end
 end
 
--- ESP throttling: tracers/boxes a 30 FPS, highlights a ~7 FPS
 local espAccum, hlAccum = 0, 0
 RunService.Heartbeat:Connect(function(dt)
     if not (C.ESPEnabled or C.TracersEnabled or C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
@@ -1155,7 +1160,7 @@ local function buildGui()
     local parent = getGuiParent()
     if not parent then warn("[ASCRON] Sem parent GUI."); return end
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v18"
+    gui.Name = "ASCRON_MM2_v19"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -1178,7 +1183,7 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v18"
+    titleLbl.Text = "ASCRON | MM2 v19"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold; titleLbl.TextSize = 13
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -1356,21 +1361,21 @@ local function buildGui()
     makeLabel(mainTab, "— Bag —", nextOrder())
     makeInput(mainTab, "Threshold (0=auto)", C.BagThresholdOverride, nextOrder(), function(v) local n=tonumber(v); if n then C.BagThresholdOverride=math.max(0,n) end end)
     local statsLbl = Instance.new("TextLabel")
-    statsLbl.Size = UDim2.new(1, 0, 0, 60)
+    statsLbl.Size = UDim2.new(1, 0, 0, 72)
     statsLbl.BackgroundColor3 = Color3.fromRGB(30, 28, 0)
     statsLbl.BorderSizePixel = 0
     statsLbl.TextColor3 = Color3.fromRGB(255, 220, 100)
     statsLbl.Font = Enum.Font.Code; statsLbl.TextSize = 10
-    statsLbl.Text = "Collected: 0\nPer hour: 0\nBag: 0/40\nFails: 0"
+    statsLbl.Text = "Collected: 0\nPer hour: 0\nBag: 0/40\nFails: 0\nStatus: idle"
     statsLbl.LayoutOrder = nextOrder(); statsLbl.Parent = mainTab
     task.spawn(function()
         while statsLbl.Parent do
-            task.wait(1)
+            task.wait(0.5)
             local bag = getStatValue()
-            local round = isInActiveRound() and "IN-ROUND" or "LOBBY/DEAD"
-            statsLbl.Text = string.format("Collected: %d\nPer hour: %d\nBag: %s/%d\n%s | Fails: %d",
+            statsLbl.Text = string.format("Collected: %d\nPer hour: %d\nBag: %s/%d\nFails: %d\nStatus: %s",
                 C.Stats.TotalCounted, getRatePerHour(),
-                bag ~= nil and tostring(bag) or "?", getBagThreshold(), round, C.CollectFails)
+                bag ~= nil and tostring(bag) or "?", getBagThreshold(),
+                C.FarmStatus or "idle")
         end
     end)
 
@@ -1453,12 +1458,6 @@ LocalPlayer.CharacterAdded:Connect(function(char)
             if hrp then pcall(function() hrp.Anchored = false end) end
         end)
     end
-    task.wait(1.5)
-    if C.Farming then
-        if hum and hum.Health > 0 and isInActiveRound() then
-            if findNearestCoin() then beginFarmMovement() end
-        end
-    end
 end)
 
 startStatsTracker()
@@ -1473,10 +1472,7 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[ASCRON] v18 pronta.")
-print("[ASCRON] HWID: " .. HWID)
+print("[ASCRON] v19 pronta.")
 if getgenv().ASCRON_SOURCE then
     print("[ASCRON] Source: " .. #getgenv().ASCRON_SOURCE .. " bytes")
-else
-    warn("[ASCRON] Source não capturada — reexec via queue pode falhar.")
 end
