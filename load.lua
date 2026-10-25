@@ -1,4 +1,4 @@
--- Lambda Hub | v0.22 | By ASCRON
+-- Lambda Hub | v0.22 | By kerli
 -- Server hop sem crash | Reexec via URL | Threshold 50 default
 
 print("[Lambda] v0.22 loading")
