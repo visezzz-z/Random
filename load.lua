@@ -1,7 +1,7 @@
--- ASCRON | MM2 AutoFarm v20
--- Fix: reset-strict on round end | Tracer player→player @60fps | Queue before teleport
+-- ASCRON | MM2 AutoFarm v21
+-- Debounced round detection | Auto-vote fix | URL reexec | Kick rejoin | ESP perf
 
-print("[ASCRON] === v20 loading ===")
+print("[ASCRON] === v21 loading ===")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -60,6 +60,7 @@ local defaults = {
     AutoShootSheriff = true, AutoResetAnyRole = false,
     AutoKillMurderer = true, AutoResetMurderer = false,
     BagThresholdOverride = 0, ResetAfterAction = true,
+    ReexecURL = "",
     ESPEnabled = false, TracersEnabled = false, ChamsEnabled = false, OutlinesEnabled = false,
     ESPShowMurderer = true, ESPShowSheriff = true, ESPShowHero = true, ESPShowInnocent = true,
     ESPCoin = false, ESPGun = false,
@@ -77,6 +78,9 @@ C.PostRoundCooldown = 0
 C.Stats = { TotalCounted = 0, SessionStart = tick(), LastSeenValue = nil }
 C.HopStatus = ""
 C.CollectFails = 0
+C.RoundMissCount = 0
+C.RoundMissStart = 0
+C.WasInRound = false
 
 local function savePrefs()
     local tbl = {}
@@ -88,7 +92,6 @@ end
 local function getHRP() local c = LocalPlayer.Character; return c and c:FindFirstChild("HumanoidRootPart") end
 local function getHum() local c = LocalPlayer.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 
--- ===================== GetPlayerData cache =====================
 local pdCache = { data = nil, timestamp = 0 }
 local function getPlayerData()
     local now = tick()
@@ -110,7 +113,6 @@ local function isInActiveRound()
     return true
 end
 
--- Desancora + cancela PlatformStand. Não reseta o personagem.
 local function cleanupMovement()
     local hrp = getHRP()
     if hrp then
@@ -127,7 +129,6 @@ local function cleanupMovement()
     end
 end
 
--- Reset forçado. Unanchor primeiro, senão Health = 0 não dispara respawn.
 local function forceReset()
     local hrp = getHRP()
     if hrp then pcall(function() hrp.Anchored = false end) end
@@ -547,54 +548,50 @@ local function getRatePerHour()
     return math.floor((C.Stats.TotalCounted / elapsed) * 3600)
 end
 
--- ===================== ROUND TRANSITION WATCHER =====================
--- Detecta transição de round por três sinais: estado de GetPlayerData,
--- salto de posição do HRP ancorado (servidor nos moveu), e Y < -100.
--- Em qualquer um, faz reset forçado e coloca cooldown de 3s.
+-- ===================== ROUND TRANSITION WATCHER (debounced) =====================
 task.spawn(function()
     local lastChar = nil
-    local lastPos = nil
-    local wasInRound = false
     while true do
-        task.wait(0.1)
+        task.wait(0.15)
         local currentChar = LocalPlayer.Character
         if currentChar ~= lastChar then
             lastChar = currentChar
-            lastPos = nil
-            wasInRound = false
+            C.RoundMissCount = 0
+            C.RoundMissStart = 0
+            C.WasInRound = false
         end
         local hrp = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
-
         if C.Farming and hrp then
-            -- Sinal 1: salto de posição (servidor moveu HRP ancorado)
-            if hrp.Anchored and lastPos then
-                local jump = (hrp.Position - lastPos).Magnitude
-                if jump > 50 then
-                    C.FarmStatus = "round teleport detected"
-                    forceReset()
-                    C.PostRoundCooldown = tick() + 3
-                end
-            end
-            lastPos = hrp.Position
-
-            -- Sinal 2: transição de round via GetPlayerData
-            local nowInRound = isInActiveRound()
-            if wasInRound and not nowInRound then
-                C.FarmStatus = "round ended"
-                forceReset()
-                C.PostRoundCooldown = tick() + 3
-            end
-            wasInRound = nowInRound
-
-            -- Sinal 3: caiu do mapa (Y < -100)
+            -- Sinal Y < -100 (caiu no void) — imediato, não debounce
             if hrp.Position.Y < -100 then
                 C.FarmStatus = "fell - recovering"
                 forceReset()
                 C.PostRoundCooldown = tick() + 3
+                C.RoundMissCount = 0
+                C.WasInRound = false
+                continue
+            end
+
+            local inRound = isInActiveRound()
+            if inRound then
+                C.WasInRound = true
+                C.RoundMissCount = 0
+                C.RoundMissStart = 0
+            elseif C.WasInRound then
+                C.RoundMissCount += 1
+                if C.RoundMissCount == 1 then C.RoundMissStart = tick() end
+                -- Confirma somente após 3 leituras negativas E 0,5s
+                if C.RoundMissCount >= 3 and tick() - C.RoundMissStart >= 0.5 then
+                    C.FarmStatus = "round ended (confirmed)"
+                    forceReset()
+                    C.PostRoundCooldown = tick() + 3
+                    C.RoundMissCount = 0
+                    C.WasInRound = false
+                end
             end
         else
-            wasInRound = false
-            lastPos = nil
+            C.RoundMissCount = 0
+            C.WasInRound = false
         end
     end
 end)
@@ -606,30 +603,25 @@ local function startFarm()
     C.FarmStatus = "starting"
     C.FarmThread = task.spawn(function()
         while C.Farming do
-            -- Cooldown pós-round: nada de ancorar, nada de mover
             if tick() < C.PostRoundCooldown then
                 C.FarmStatus = "post-round cooldown"
                 cleanupMovement()
                 task.wait(0.2)
                 continue
             end
-
             local hum = getHum()
             local hrp = getHRP()
-
             if not hum or hum.Health <= 0 or not hrp then
                 C.FarmStatus = "no character"
                 task.wait(0.3)
                 continue
             end
-
             if not isInActiveRound() then
                 C.FarmStatus = "lobby"
                 cleanupMovement()
                 task.wait(0.3)
                 continue
             end
-
             local coin = findNearestCoin()
             if coin then
                 if not hrp.Anchored then beginFarmMovement(); task.wait(0.05) end
@@ -644,8 +636,6 @@ local function startFarm()
                     if coin.Parent then C.CollectFails += 1 else C.CollectFails = 0 end
                 elseif not isInActiveRound() then
                     C.FarmStatus = "round ended mid-travel"
-                    forceReset()
-                    C.PostRoundCooldown = tick() + 3
                 else
                     C.FarmStatus = "travel aborted"
                 end
@@ -655,7 +645,6 @@ local function startFarm()
                 cleanupMovement()
                 task.wait(0.3)
             end
-
             local st = getStatValue()
             if st and st >= getBagThreshold() and tick() - C.LastFullAction > 3 then
                 C.LastFullAction = tick()
@@ -683,7 +672,6 @@ local function captureSource()
         local ok, existing = pcall(read, SOURCE_FILE)
         if ok and existing and #existing > 1000 then
             getgenv().ASCRON_SOURCE = existing
-            print("[ASCRON] Source: arquivo (" .. #existing .. " bytes)")
             return true
         end
     end
@@ -727,40 +715,82 @@ local function captureSource()
     return false
 end
 
-local function queueForReexecution()
+-- Retorna a string que será enfileirada. Prioridade: URL > readfile > full source.
+local function getReexecPayload()
+    local url = C.ReexecURL
+    if url and url ~= "" then
+        return 'pcall(function() loadstring(game:HttpGet("' .. url .. '"))() end)', "url"
+    end
     if not getgenv().ASCRON_SOURCE then captureSource() end
-    if not getgenv().ASCRON_SOURCE then
-        warn("[ASCRON] Reexec: source não capturada.")
+    local src = getgenv().ASCRON_SOURCE
+    if not src then return nil, "none" end
+    local write = type(writefile) == "function" and writefile or getgenv().writefile
+    if write then pcall(write, SOURCE_FILE, src) end
+    return "pcall(function() local s = readfile('" .. SOURCE_FILE .. "'); if s and #s > 100 then loadstring(s)() end end)", "file"
+end
+
+local function queueForReexecution()
+    local payload, kind = getReexecPayload()
+    if not payload then
+        warn("[ASCRON] Reexec: sem URL e sem source.")
         return false
     end
-    local write = type(writefile) == "function" and writefile or getgenv().writefile
-    if write then pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE) end
-    -- Loader minimalista: sem escapes, sem funções exóticas. Compila em qualquer executor.
-    local loader = "loadstring(readfile('ASCRON_MM2_SOURCE.lua'))()"
-
     if syn and type(syn.queue_on_teleport) == "function" then
-        if pcall(syn.queue_on_teleport, loader) then print("[ASCRON] Reexec: syn"); return true end
-        if pcall(syn.queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: syn(full)"); return true end
+        if pcall(syn.queue_on_teleport, payload) then
+            print("[ASCRON] Reexec: syn (" .. kind .. ")")
+            return true
+        end
     end
     if type(queue_on_teleport) == "function" then
-        if pcall(queue_on_teleport, loader) then print("[ASCRON] Reexec: queue_on_teleport"); return true end
-        if pcall(queue_on_teleport, getgenv().ASCRON_SOURCE) then print("[ASCRON] Reexec: queue_on_teleport(full)"); return true end
+        if pcall(queue_on_teleport, payload) then
+            print("[ASCRON] Reexec: queue_on_teleport (" .. kind .. ")")
+            return true
+        end
     end
     local g = getgenv()
     if g and type(g.queue_on_teleport) == "function" then
-        if pcall(g.queue_on_teleport, loader) then print("[ASCRON] Reexec: getgenv().queue_on_teleport"); return true end
+        if pcall(g.queue_on_teleport, payload) then
+            print("[ASCRON] Reexec: getgenv (" .. kind .. ")")
+            return true
+        end
     end
     if type(queueonteleport) == "function" then
-        if pcall(queueonteleport, loader) then print("[ASCRON] Reexec: queueonteleport"); return true end
+        if pcall(queueonteleport, payload) then
+            print("[ASCRON] Reexec: queueonteleport (" .. kind .. ")")
+            return true
+        end
     end
-    -- Clipboard fallback
-    pcall(function()
-        if type(setclipboard) == "function" then setclipboard(getgenv().ASCRON_SOURCE) end
-    end)
-    warn("[ASCRON] Reexec indisponível. Source salva em " .. SOURCE_FILE)
-    warn("[ASCRON] Ative Auto-Execute no executor, OU cole do clipboard após teleporte.")
+    warn("[ASCRON] Reexec: nenhum método de queue.")
     return false
 end
+
+-- ===================== KICK HOOK (rejoin on kick) =====================
+pcall(function()
+    if not (getrawmetatable and setreadonly and newcclosure) then return end
+    local mt = getrawmetatable(game)
+    local oldNamecall = mt.__namecall
+    setreadonly(mt, false)
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if method == "Kick" and self == LocalPlayer then
+            print("[ASCRON] Kick interceptado! Tentando rejoin.")
+            -- queue ANTES do teleport
+            local payload = getReexecPayload()
+            if payload then
+                if syn and syn.queue_on_teleport then pcall(syn.queue_on_teleport, payload) end
+                if type(queue_on_teleport) == "function" then pcall(queue_on_teleport, payload) end
+            end
+            task.spawn(function()
+                task.wait(0.1)
+                pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+            end)
+            return nil
+        end
+        return oldNamecall(self, ...)
+    end)
+    setreadonly(mt, true)
+    print("[ASCRON] Kick hook instalado.")
+end)
 
 -- ===================== HTTP =====================
 local function httpGet(url)
@@ -777,7 +807,7 @@ local function httpGet(url)
     return nil
 end
 
--- ===================== HOP (queue ANTES do teleporte) =====================
+-- ===================== HOP =====================
 local function getServerPool()
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
     local raw = httpGet(url)
@@ -818,18 +848,10 @@ local function tryTeleport(serverId)
 end
 
 local function hop()
-    -- 1. Salva source em arquivo (garante persistência entre servidores)
-    if not getgenv().ASCRON_SOURCE then captureSource() end
-    local write = type(writefile) == "function" and writefile or getgenv().writefile
-    if write and getgenv().ASCRON_SOURCE then
-        pcall(write, SOURCE_FILE, getgenv().ASCRON_SOURCE)
-    end
-
-    -- 2. Enfileira ANTES do teleporte (obrigatório para queue_on_teleport funcionar)
-    C.HopStatus = "queueing reexec"
+    -- Enfileira reexec ANTES de qualquer tentativa de teleporte
+    C.HopStatus = "queueing"
     local queued = queueForReexecution()
 
-    -- 3. Busca servidores e teleporta
     C.HopStatus = "buscando..."
     local pool = getServerPool()
     if #pool == 0 then
@@ -890,7 +912,7 @@ local function startFriendMonitor()
     end)
 end
 
--- ===================== AUTO-VOTE =====================
+-- ===================== AUTO-VOTE (fix: landing + touch) =====================
 local VOTE_PADS = {"VotePad1", "VotePad2", "VotePad3"}
 local MAP_ORDER = {"Manor","House 2","Office 3","Hospital 3","Bank 2","Vampire's Castle","Mansion 2","WorkPlace","Hotel 2","Farm House","Police Station","Factory","Bio Lab","Research Facility","Mil Base"}
 local function normalizeMapName(s) s = string.lower(s):gsub("-", " "):gsub("%s+", " "); return s:match("^%s*(.-)%s*$") end
@@ -936,38 +958,85 @@ local function insidePad(trigger, pos)
     local h = trigger.Size * 0.5
     return math.abs(lp.X) <= h.X and math.abs(lp.Y) <= h.Y and math.abs(lp.Z) <= h.Z
 end
+
+local function castVote(target)
+    local hrp = getHRP()
+    local hum = getHum()
+    if not hrp or not hum or hum.Health <= 0 then return false end
+
+    -- 1. Limpa qualquer estado do farm
+    hrp.Anchored = false
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    hum.PlatformStand = false
+    hum.AutoRotate = true
+
+    -- 2. Move para cima do pad (ligeiramente acima para cair dentro)
+    local padPos = target.trigger.Position
+    hrp.CFrame = CFrame.new(padPos + Vector3.new(0, 4, 0))
+
+    -- 3. Deixa cair até tocar
+    local start = tick()
+    local landed = false
+    while tick() - start < 2 do
+        task.wait(0.05)
+        local curHrp = getHRP()
+        if not curHrp then return false end
+        if insidePad(target.trigger, curHrp.Position) then
+            landed = true
+            break
+        end
+        -- Se não caiu por algum motivo (rodada reiniciou, pad sumiu), força
+        if tick() - start > 1 then
+            curHrp.CFrame = CFrame.new(padPos + Vector3.new(0, 1, 0))
+        end
+    end
+    if not landed then return false end
+
+    -- 4. Dispara firetouchinterest na pad
+    if typeof(firetouchinterest) == "function" then
+        pcall(function()
+            firetouchinterest(hrp, target.trigger, 0)
+            task.wait(0.05)
+            firetouchinterest(hrp, target.trigger, 1)
+        end)
+    end
+
+    -- 5. Aguarda o voto registrar
+    task.wait(0.3)
+
+    -- 6. Dispara segunda vez (backup para toques perdidos)
+    if typeof(firetouchinterest) == "function" then
+        pcall(function()
+            firetouchinterest(hrp, target.trigger, 0)
+            task.wait(0.05)
+            firetouchinterest(hrp, target.trigger, 1)
+        end)
+    end
+
+    -- 7. Reseta para poder votar de novo
+    task.wait(0.2)
+    if hum.Health > 0 then
+        hum:ChangeState(Enum.HumanoidStateType.Dead)
+        hum.Health = 0
+    end
+    return true
+end
+
 local function startAutoVote()
     if C.VoteThread then task.cancel(C.VoteThread) end
     C.VoteThread = task.spawn(function()
         local votes = 0
         while C.AutoVoteMode ~= 0 do
             local open = getOpenVotePads()
-            if #open == 0 then task.wait(0.3)
+            if #open == 0 then task.wait(0.4)
             elseif C.AutoVoteMax > 0 and votes >= C.AutoVoteMax then task.wait(0.5)
             else
                 local target = pickVotePad(open)
-                local hrp = getHRP(); local hum = getHum()
-                if target and hum and hrp and hum.Health > 0 then
-                    if not insidePad(target.trigger, hrp.Position) then
-                        if hrp.Anchored then hrp.Anchored = false end
-                        hrp.CFrame = CFrame.new(target.trigger.Position + Vector3.new(0, 1, 0)) * hrp.CFrame.Rotation
-                    end
-                    if typeof(firetouchinterest) == "function" then
-                        firetouchinterest(hrp, target.trigger, 0)
-                        firetouchinterest(hrp, target.trigger, 1)
-                    end
-                    task.wait(0.12)
-                    if hum.Health > 0 then
-                        if typeof(firetouchinterest) == "function" then
-                            firetouchinterest(hrp, target.trigger, 0)
-                            firetouchinterest(hrp, target.trigger, 1)
-                        end
-                        votes += 1
-                        hum:ChangeState(Enum.HumanoidStateType.Dead)
-                        hum.Health = 0
-                    end
+                if target and castVote(target) then
+                    votes += 1
                 end
-                task.wait(0.05)
+                task.wait(0.5)
             end
         end
     end)
@@ -993,7 +1062,6 @@ local DrawingAvailable = (function()
     if ok and d then pcall(function() d:Remove() end); return true end
     return false
 end)
-print("[ASCRON] Drawing API: " .. tostring(DrawingAvailable))
 
 local function getRoleColor(role) return ROLE_COLORS[role] or ROLE_COLORS.Unknown end
 local function shouldShowRole(role)
@@ -1018,7 +1086,6 @@ local function createPlayerDraws(player)
 end
 local function hideDraws(draws) for _, d in pairs(draws) do pcall(function() d.Visible = false end) end end
 
--- Cache do papel por jogador para evitar GetPlayerData calls repetidos
 local roleSnapshot = { data = nil, timestamp = 0 }
 local function getRoleSnapshot()
     local now = tick()
@@ -1029,27 +1096,27 @@ local function getRoleSnapshot()
     return data
 end
 
--- Tracers e boxes em um único passe, chamado em RenderStepped (60 FPS)
-local function updateDrawings()
+-- Loop principal: tracers a 60 FPS, boxes/names a 20 FPS
+local boxAccum = 0
+RunService.RenderStepped:Connect(function(dt)
+    if not (C.ESPEnabled or C.TracersEnabled) then return end
     if not DrawingAvailable then return end
-    if not (C.ESPEnabled or C.TracersEnabled) then
-        for _, draws in pairs(ESP.draws) do hideDraws(draws) end
-        return
-    end
     local cam = workspace.CurrentCamera; if not cam then return end
-    local data = getRoleSnapshot()
 
-    -- Origem do tracer: personagem local projetado. Fallback: centro inferior.
+    boxAccum += dt
+    local doBoxes = boxAccum >= 0.05
+    if doBoxes then boxAccum = 0 end
+
+    local data = getRoleSnapshot()
     local screenSize = cam.ViewportSize
+
+    -- Origem do tracer: personagem local projetado
     local tracerOrigin = Vector2.new(screenSize.X / 2, screenSize.Y)
-    local localChar = LocalPlayer.Character
-    local localHrp = localChar and localChar:FindFirstChild("HumanoidRootPart")
-    local localHum = localChar and localChar:FindFirstChildOfClass("Humanoid")
+    local localHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localHum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
     if localHrp and localHum and localHum.Health > 0 then
         local lp, onScreen = cam:WorldToViewportPoint(localHrp.Position)
-        if onScreen then
-            tracerOrigin = Vector2.new(lp.X, lp.Y)
-        end
+        if onScreen then tracerOrigin = Vector2.new(lp.X, lp.Y) end
     end
 
     for _, player in ipairs(Players:GetPlayers()) do
@@ -1061,39 +1128,68 @@ local function updateDrawings()
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not head or not hrp or not hum or hum.Health <= 0 then hideDraws(draws) continue end
+
         local role = "Innocent"
         if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
             role = data[player.Name].Role
         end
         if not shouldShowRole(role) then hideDraws(draws) continue end
+
         local headScreen, on1 = cam:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-        local legScreen, on2 = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 2.8, 0))
-        if not (on1 and on2) then hideDraws(draws) continue end
-        local h = math.abs(headScreen.Y - legScreen.Y)
-        local w = h / 1.8
-        local x = headScreen.X - w / 2
-        local y = headScreen.Y
+        if not on1 then hideDraws(draws) continue end
         local color = getRoleColor(role)
+
+        -- Tracer (60 FPS)
+        if C.TracersEnabled and draws.tracer then
+            draws.tracer.From = tracerOrigin
+            draws.tracer.To = Vector2.new(headScreen.X, headScreen.Y)
+            draws.tracer.Color = color
+            draws.tracer.Visible = true
+        elseif draws.tracer then
+            draws.tracer.Visible = false
+        end
+
+        -- Box/name/health (20 FPS)
         if C.ESPEnabled then
-            if draws.box then
-                draws.box.Position = Vector2.new(x, y)
-                draws.box.Size = Vector2.new(w, h)
-                draws.box.Color = color; draws.box.Visible = true
-            end
-            if draws.name then
-                draws.name.Text = player.Name .. " [" .. role .. "]"
-                draws.name.Position = Vector2.new(headScreen.X, y - 18)
-                draws.name.Color = color; draws.name.Visible = true
-            end
-            if draws.hBg then
-                draws.hBg.Position = Vector2.new(x - 6, y); draws.hBg.Size = Vector2.new(3, h); draws.hBg.Visible = true
-            end
-            if draws.hFill then
-                local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-                draws.hFill.Position = Vector2.new(x - 6, y + h * (1 - pct))
-                draws.hFill.Size = Vector2.new(3, h * pct)
-                draws.hFill.Color = Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
-                draws.hFill.Visible = true
+            if doBoxes then
+                local legScreen, on2 = cam:WorldToViewportPoint(hrp.Position - Vector3.new(0, 2.8, 0))
+                if on2 then
+                    local h = math.abs(headScreen.Y - legScreen.Y)
+                    if h > 5 then
+                        local w = h / 1.8
+                        local x = headScreen.X - w / 2
+                        local y = headScreen.Y
+                        if draws.box then
+                            draws.box.Position = Vector2.new(x, y)
+                            draws.box.Size = Vector2.new(w, h)
+                            draws.box.Color = color
+                            draws.box.Visible = true
+                        end
+                        if draws.name then
+                            draws.name.Text = player.Name .. " [" .. role .. "]"
+                            draws.name.Position = Vector2.new(headScreen.X, y - 18)
+                            draws.name.Color = color
+                            draws.name.Visible = true
+                        end
+                        if draws.hBg then
+                            draws.hBg.Position = Vector2.new(x - 6, y)
+                            draws.hBg.Size = Vector2.new(3, h)
+                            draws.hBg.Visible = true
+                        end
+                        if draws.hFill then
+                            local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                            draws.hFill.Position = Vector2.new(x - 6, y + h * (1 - pct))
+                            draws.hFill.Size = Vector2.new(3, h * pct)
+                            draws.hFill.Color = Color3.fromRGB(255 * (1 - pct), 255 * pct, 0)
+                            draws.hFill.Visible = true
+                        end
+                    else
+                        if draws.box then draws.box.Visible = false end
+                        if draws.name then draws.name.Visible = false end
+                        if draws.hBg then draws.hBg.Visible = false end
+                        if draws.hFill then draws.hFill.Visible = false end
+                    end
+                end
             end
         else
             if draws.box then draws.box.Visible = false end
@@ -1101,60 +1197,62 @@ local function updateDrawings()
             if draws.hBg then draws.hBg.Visible = false end
             if draws.hFill then draws.hFill.Visible = false end
         end
-        if C.TracersEnabled and draws.tracer then
-            draws.tracer.From = tracerOrigin
-            draws.tracer.To = Vector2.new(headScreen.X, headScreen.Y)
-            draws.tracer.Color = color; draws.tracer.Visible = true
-        elseif draws.tracer then
-            draws.tracer.Visible = false
-        end
     end
-end
-
--- RenderStepped: 60 FPS para tracers e boxes (smooth)
-RunService.RenderStepped:Connect(function()
-    if not (C.ESPEnabled or C.TracersEnabled) then return end
-    pcall(updateDrawings)
 end)
 
--- Highlights: Heartbeat 15 FPS
-local function updateHighlights()
-    local data = getRoleSnapshot()
-    local function getRole(player)
-        if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
-            return data[player.Name].Role
+-- Highlights: 6 FPS. Gun/coin scan separados com throttles próprios.
+local hlAccum, gunAccum, coinAccum = 0, 0, 0
+RunService.Heartbeat:Connect(function(dt)
+    if not (C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
+    hlAccum += dt; gunAccum += dt; coinAccum += dt
+
+    local doHL = hlAccum >= 0.15
+    local doGun = C.ESPGun and gunAccum >= 0.5
+    local doCoin = C.ESPCoin and coinAccum >= 0.3
+    if doHL then hlAccum = 0 end
+    if doGun then gunAccum = 0 end
+    if doCoin then coinAccum = 0 end
+
+    -- Highlights de jogadores
+    if doHL and (C.ChamsEnabled or C.OutlinesEnabled) then
+        local data = getRoleSnapshot()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            local char = player.Character
+            local hl = ESP.highlights[player]
+            if not char then
+                if hl then pcall(function() hl:Destroy() end); ESP.highlights[player] = nil end
+                continue
+            end
+            local role = "Innocent"
+            if data and data[player.Name] and data[player.Name].Role and data[player.Name].Role ~= "None" then
+                role = data[player.Name].Role
+            end
+            if not shouldShowRole(role) then
+                if hl then pcall(function() hl:Destroy() end); ESP.highlights[player] = nil end
+                continue
+            end
+            if not hl or hl.Parent ~= char then
+                if hl then pcall(function() hl:Destroy() end) end
+                hl = Instance.new("Highlight")
+                hl.Name = "ASCRON_HL_" .. player.Name
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Parent = char
+                ESP.highlights[player] = hl
+            end
+            local color = getRoleColor(role)
+            hl.FillColor = color
+            hl.OutlineColor = color
+            hl.FillTransparency = C.ChamsEnabled and 0.45 or 1
+            hl.OutlineTransparency = C.OutlinesEnabled and 0 or 1
         end
-        return "Innocent"
+    elseif not (C.ChamsEnabled or C.OutlinesEnabled) then
+        for _, hl in pairs(ESP.highlights) do pcall(function() hl:Destroy() end) end
+        ESP.highlights = {}
     end
-    local active = C.ChamsEnabled or C.OutlinesEnabled
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player == LocalPlayer then continue end
-        local char = player.Character
-        local hl = ESP.highlights[player]
-        if not char or not active then
-            if hl then pcall(function() hl:Destroy() end); ESP.highlights[player] = nil end
-            continue
-        end
-        local role = getRole(player)
-        if not shouldShowRole(role) then
-            if hl then pcall(function() hl:Destroy() end); ESP.highlights[player] = nil end
-            continue
-        end
-        if not hl or hl.Parent ~= char then
-            if hl then pcall(function() hl:Destroy() end) end
-            hl = Instance.new("Highlight")
-            hl.Name = "ASCRON_HL_" .. player.Name
-            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            hl.Parent = char
-            ESP.highlights[player] = hl
-        end
-        local color = getRoleColor(role)
-        hl.FillColor = color
-        hl.OutlineColor = color
-        hl.FillTransparency = C.ChamsEnabled and 0.45 or 1
-        hl.OutlineTransparency = C.OutlinesEnabled and 0 or 1
-    end
-    if C.ESPCoin then
+
+    -- Coin highlights
+    if doCoin then
         local containers = getCurrencyContainers()
         local seen = {}
         for _, container in ipairs(containers) do
@@ -1181,11 +1279,13 @@ local function updateHighlights()
                 pcall(function() hl:Destroy() end); ESP.coinHighlights[part] = nil
             end
         end
-    else
+    elseif not C.ESPCoin then
         for _, hl in pairs(ESP.coinHighlights) do pcall(function() hl:Destroy() end) end
         ESP.coinHighlights = {}
     end
-    if C.ESPGun then
+
+    -- Gun highlights
+    if doGun then
         local seen = {}
         for _, obj in ipairs(Workspace:GetDescendants()) do
             if obj:IsA("Model") and (obj.Name == "Gun" or obj.Name == "Revolver") then
@@ -1211,19 +1311,9 @@ local function updateHighlights()
                 pcall(function() hl:Destroy() end); ESP.gunHighlights[obj] = nil
             end
         end
-    else
+    elseif not C.ESPGun then
         for _, hl in pairs(ESP.gunHighlights) do pcall(function() hl:Destroy() end) end
         ESP.gunHighlights = {}
-    end
-end
-
-local hlAccum = 0
-RunService.Heartbeat:Connect(function(dt)
-    if not (C.ChamsEnabled or C.OutlinesEnabled or C.ESPCoin or C.ESPGun) then return end
-    hlAccum += dt
-    if hlAccum >= 0.066 then
-        hlAccum = 0
-        pcall(updateHighlights)
     end
 end)
 
@@ -1248,7 +1338,7 @@ local function buildGui()
     local parent = getGuiParent()
     if not parent then warn("[ASCRON] Sem parent GUI."); return end
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v20"
+    gui.Name = "ASCRON_MM2_v21"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -1271,7 +1361,7 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v20"
+    titleLbl.Text = "ASCRON | MM2 v21"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold; titleLbl.TextSize = 13
     titleLbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -1412,6 +1502,23 @@ local function buildGui()
         box.Parent = row
         box.FocusLost:Connect(function() pcall(function() cb(box.Text) end); savePrefs() end)
     end
+    local function makeWideInput(parent, labelText, value, order, cb)
+        local col = Instance.new("Frame")
+        col.Size = UDim2.new(1, 0, 0, 44); col.BackgroundTransparency = 1
+        col.LayoutOrder = order; col.Parent = parent
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, 0, 0, 14); lbl.BackgroundTransparency = 1
+        lbl.Text = labelText; lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+        lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11
+        lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.Parent = col
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.new(1, 0, 0, 24); box.Position = UDim2.new(0, 0, 0, 16)
+        box.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+        box.TextColor3 = Color3.fromRGB(255, 255, 255); box.Text = tostring(value)
+        box.Font = Enum.Font.Gotham; box.TextSize = 10
+        box.Parent = col
+        box.FocusLost:Connect(function() pcall(function() cb(box.Text) end); savePrefs() end)
+    end
     local function makeCycle(parent, labelText, options, initialValue, order, cb)
         local row = Instance.new("Frame")
         row.Size = UDim2.new(1, 0, 0, 26); row.BackgroundTransparency = 1
@@ -1504,6 +1611,7 @@ local function buildGui()
     makeToggle(espTab, "Dropped Gun ESP", C.ESPGun, nextOrder(), function(s) C.ESPGun = s end)
 
     order = 0
+    makeWideInput(serverTab, "Reexec URL (raw GitHub)", C.ReexecURL, nextOrder(), function(v) C.ReexecURL = v end)
     makeInput(serverTab, "Hop if players >", C.ServerHopPlayerCount, nextOrder(), function(v) local n=tonumber(v); if n then C.ServerHopPlayerCount=n end end)
     makeToggle(serverTab, "Hop when friend joins", C.HopOnFriendJoin, nextOrder(), function(s) C.HopOnFriendJoin = s; if s then startFriendMonitor() end end)
     local hopStatusLbl = Instance.new("TextLabel")
@@ -1539,6 +1647,8 @@ captureSource()
 LocalPlayer.CharacterAdded:Connect(function(char)
     pdCache.data = nil; pdCache.timestamp = 0
     roleSnapshot.data = nil; roleSnapshot.timestamp = 0
+    C.RoundMissCount = 0
+    C.WasInRound = false
     task.wait(0.5)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum then
@@ -1561,7 +1671,10 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[ASCRON] v20 pronta.")
+print("[ASCRON] v21 pronta.")
 if getgenv().ASCRON_SOURCE then
     print("[ASCRON] Source: " .. #getgenv().ASCRON_SOURCE .. " bytes")
+end
+if C.ReexecURL ~= "" then
+    print("[ASCRON] Reexec URL: " .. C.ReexecURL)
 end
