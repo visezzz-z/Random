@@ -1,10 +1,9 @@
--- ASCRON | MM2 AutoFarm v12
--- Smooth tween | Anti-fling CharacterAdded reset | Post-action reset | Source save + queue
+-- ASCRON | MM2 AutoFarm v13
+-- Smooth anchored movement | Robust hop with diagnostics | Post-action reset
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
-local TweenService = game:GetService("TweenService")
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -51,7 +50,7 @@ getgenv().ASCRON = getgenv().ASCRON or {}
 local C = getgenv().ASCRON
 
 local defaults = {
-    Currency = "Coin", FarmSpeed = 22, FarmMode = "Standard",
+    Currency = "Coin", FarmSpeed = 30, FarmMode = "Standard",
     ServerHopPlayerCount = 6, HopOnFriendJoin = false,
     AntiAFK = true, AntiVoid = true, AntiFling = true, Noclip = true,
     Disable3D = false, AutoVoteMode = 0, AutoVoteMax = 0,
@@ -74,8 +73,8 @@ C.Farming = false
 C.FarmThread = nil
 C.HopThread, C.FriendThread, C.VoteThread = nil, nil, nil
 C.LastFullAction = 0
-C.activeTween = nil
 C.Stats = { TotalCounted = 0, SessionStart = tick(), LastSeenValue = nil }
+C.HopStatus = ""
 
 local function savePrefs()
     local tbl = {}
@@ -84,11 +83,6 @@ local function savePrefs()
 end
 
 -- ===================== UTIL =====================
-local function getChar()
-    local ch = LocalPlayer.Character
-    if ch and ch:FindFirstChild("HumanoidRootPart") then return ch end
-    return LocalPlayer.CharacterAdded:Wait()
-end
 local function getHRP()
     local c = LocalPlayer.Character
     return c and c:FindFirstChild("HumanoidRootPart")
@@ -106,16 +100,12 @@ local function getPlayerData()
     local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
     if not remote or not remote:IsA("RemoteFunction") then return nil end
     local ok, data = pcall(function() return remote:InvokeServer() end)
-    if ok and data then
-        pdCache.data = data
-        pdCache.timestamp = now
-        return data
-    end
+    if ok and data then pdCache.data = data; pdCache.timestamp = now; return data end
     return pdCache.data
 end
 
 -- ===================== BAG DETECTION =====================
-local EVENT_CURRENCIES = { Candy = true, SnowToken = true, Token = true, Shell = true, Egg = true, Present = true, Gift = true, Gem = true }
+local EVENT_CURRENCIES = { Candy=true, SnowToken=true, Token=true, Shell=true, Egg=true, Present=true, Gift=true, Gem=true }
 local function getBagThreshold()
     if C.BagThresholdOverride and C.BagThresholdOverride > 0 then return C.BagThresholdOverride end
     if EVENT_CURRENCIES[C.Currency] then return 50 end
@@ -152,8 +142,6 @@ local function getStatValue()
             if type(me[name]) == "number" then return me[name] end
         end
         if type(me.Bag) == "number" then return me.Bag end
-        if type(me.Coins) == "number" then return me.Coins end
-        if type(me.Candies) == "number" then return me.Candies end
     end
     return nil
 end
@@ -202,7 +190,7 @@ local function setupAntiVoid()
     end)
 end
 
--- ===================== ANTI-FLING (com reset de personagem) =====================
+-- ===================== ANTI-FLING =====================
 local function startAntiFling()
     local lastPos, lastCheck = nil, tick()
     local lastChar = nil
@@ -210,16 +198,10 @@ local function startAntiFling()
         if not C.AntiFling then return end
         local char = LocalPlayer.Character
         if not char then lastChar = nil; lastPos = nil; return end
-        -- Detecta troca de personagem (respawn) - reset do rastreio
-        if char ~= lastChar then
-            lastChar = char
-            lastPos = nil
-            lastCheck = tick()
-            return
-        end
+        if char ~= lastChar then lastChar = char; lastPos = nil; lastCheck = tick(); return end
         local hrp = char:FindFirstChild("HumanoidRootPart")
         local hum = char:FindFirstChildOfClass("Humanoid")
-        if not hrp or not hum or hum.Health <= 0 then lastPos = nil; return end
+        if not hrp or not hum or hum.Health <= 0 or hrp.Anchored then lastPos = nil; return end
         local now = tick()
         if lastPos and now - lastCheck > 0.1 then
             local speed = (hrp.Position - lastPos).Magnitude / (now - lastCheck)
@@ -259,82 +241,72 @@ local function collect(coin)
     local hrp = getHRP(); if not hrp or not coin then return end
     pcall(function()
         firetouchinterest(hrp, coin, 0)
-        task.wait(0.03)
+        task.wait(0.02)
         firetouchinterest(hrp, coin, 1)
     end)
 end
 
--- ===================== MOVIMENTO SUAVE (TweenService Linear) =====================
+-- ===================== MOVIMENTO LISO (HRP ancorado) =====================
 local LAY_ROTATION = CFrame.Angles(math.rad(90), 0, 0)
-local function cancelMove()
-    if C.activeTween then
-        pcall(function() C.activeTween:Cancel() end)
-        C.activeTween = nil
-    end
-end
 
-local function smoothMove(targetPos, rotate90, speed)
+local function travelTo(targetPos, rotate90, speed)
     local hrp = getHRP()
     if not hrp then return false end
-    cancelMove()
+    -- Re-ancora caso tenha respawnado
+    if not hrp.Anchored then hrp.Anchored = true end
+    local hum = getHum()
+    if hum and not hum.PlatformStand then
+        hum.PlatformStand = true
+        hum.AutoRotate = false
+    end
 
-    local distance = (targetPos - hrp.Position).Magnitude
-    if distance < 2 then return true end
+    speed = math.clamp(speed or C.FarmSpeed, 8, 60)
+    local rotation = rotate90 and LAY_ROTATION or hrp.CFrame.Rotation
+    local lastTime = tick()
 
-    speed = math.clamp(speed or C.FarmSpeed, 8, 45)
-    local duration = math.max(0.3, distance / speed)
+    while C.Farming do
+        local h = getHRP()
+        if not h or not h.Anchored then return false end
+        local delta = targetPos - h.Position
+        local dist = delta.Magnitude
+        if dist < 2.5 then
+            h.CFrame = CFrame.new(targetPos) * rotation
+            return true
+        end
+        local now = tick()
+        local dt = math.min(now - lastTime, 0.05)
+        lastTime = now
+        local step = math.min(speed * dt, dist)
+        local newPos = h.Position + delta.Unit * step
+        h.CFrame = CFrame.new(newPos) * rotation
+        task.wait()
+    end
+    return false
+end
 
-    -- Trava o humanoid para não brigar com a física
+local function beginFarmMovement()
+    local hrp = getHRP()
     local hum = getHum()
     if hum then
         hum.PlatformStand = true
         hum.AutoRotate = false
     end
-
-    -- CFrame alvo preserva rotação atual (ou rotaciona 90° para Lay/Safe)
-    local baseRot = hrp.CFrame.Rotation
-    if rotate90 then baseRot = LAY_ROTATION end
-    local goalCFrame = CFrame.new(targetPos) * baseRot
-
-    local tween = TweenService:Create(
-        hrp,
-        TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, 0, false, 0),
-        { CFrame = goalCFrame }
-    )
-    C.activeTween = tween
-
-    local completed = false
-    local conn = tween.Completed:Connect(function(state)
-        if state == Enum.PlaybackState.Completed then completed = true end
-    end)
-    tween:Play()
-
-    local start = tick()
-    while C.Farming and not completed and tick() - start < duration + 0.5 do
-        task.wait(0.03)
+    if hrp then
+        hrp.Anchored = true
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
     end
-    conn:Disconnect()
-    cancelMove()
-
-    local h = getHRP()
-    if h then
-        h.CFrame = goalCFrame
-        h.AssemblyLinearVelocity = Vector3.zero
-        h.AssemblyAngularVelocity = Vector3.zero
-    end
-    if hum then hum.AutoRotate = true end
-
-    return true
 end
 
-local function applyMode()
-    local hum = getHum(); if not hum then return end
-    hum.PlatformStand = (C.FarmMode == "Lay" or C.FarmMode == "Safe")
-end
-local function resetMode()
+local function endFarmMovement()
+    local hrp = getHRP()
     local hum = getHum()
+    if hrp then
+        pcall(function() hrp.Anchored = false end)
+    end
     if hum then
         hum.PlatformStand = false
+        hum.AutoRotate = true
         pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
     end
 end
@@ -383,24 +355,22 @@ local function equipTool(name)
     end
     return tool
 end
-
 local function killAll()
     local knife = equipTool("Knife")
     if not knife then return end
     local events = knife:FindFirstChild("Events")
-    local handleTouched = events and events:FindFirstChild("HandleTouched")
-    if not handleTouched then return end
+    local ht = events and events:FindFirstChild("HandleTouched")
+    if not ht then return end
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LocalPlayer and p.Character then
             local upper = p.Character:FindFirstChild("UpperTorso") or p.Character:FindFirstChild("Torso")
             if upper then
-                pcall(function() handleTouched:FireServer(upper) end)
+                pcall(function() ht:FireServer(upper) end)
                 task.wait(0.05)
             end
         end
     end
 end
-
 local function shootMurderer()
     local gun = equipTool("Gun")
     if not gun then return end
@@ -409,32 +379,22 @@ local function shootMurderer()
     local mHrp = murderer.Character:FindFirstChild("HumanoidRootPart")
     local hrp = getHRP()
     if not mHrp or not hrp then return end
-
-    hrp.CFrame = CFrame.new(hrp.Position, mHrp.Position)
+    hrp.CFrame = CFrame.new(hrp.Position, mHrp.Position) * CFrame.Angles(0, 0, 0)
     task.wait(0.1)
-
-    -- Método 1: Tool:Activate (compatível com mobile)
     pcall(function() gun:Activate() end)
     task.wait(0.05)
-
-    -- Método 2: virtual mouse (PC)
     pcall(function()
         VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
         task.wait(0.05)
         VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
     end)
-
-    -- Método 3: remote events do gun
     local events = gun:FindFirstChild("Events")
     if events then
         for _, ev in ipairs(events:GetChildren()) do
-            if ev:IsA("RemoteEvent") then
-                pcall(function() ev:FireServer(mHrp) end)
-            end
+            if ev:IsA("RemoteEvent") then pcall(function() ev:FireServer(mHrp) end) end
         end
     end
 end
-
 local function flingMurderer()
     local murderer = findMurderer()
     if not murderer or not murderer.Character then return end
@@ -454,16 +414,20 @@ local function flingMurderer()
     Debris:AddItem(bv, 0.6)
     Debris:AddItem(bg, 0.6)
 end
-
 local function resetCharacter()
+    -- Desancora antes de resetar, senão Health = 0 não dispara
+    local hrp = getHRP()
+    if hrp then pcall(function() hrp.Anchored = false end) end
     local hum = getHum()
-    if hum and hum.Health > 0 then hum.Health = 0 end
+    if hum then
+        hum.PlatformStand = false
+        hum.Health = 0
+    end
 end
 
 local function handleFullBag()
     local role = getMyRole()
     local didAction = false
-
     if role == "Innocent" then
         if C.AutoFlingMurderer then flingMurderer(); didAction = true end
         if C.AutoResetInnocent and not didAction then resetCharacter(); return end
@@ -473,14 +437,11 @@ local function handleFullBag()
         if C.AutoKillMurderer then killAll(); didAction = true end
         if C.AutoResetMurderer and not didAction then resetCharacter(); return end
     end
-
-    -- Reset pós-ação para reiniciar o ciclo (lobby → vote → round)
     if didAction and C.ResetAfterAction then
-        task.wait(1.0)
+        task.wait(1.2)
         resetCharacter()
         return
     end
-
     if C.AutoResetAnyRole then resetCharacter() end
 end
 
@@ -511,64 +472,61 @@ end
 local function startFarm()
     if C.Farming then return end
     C.Farming = true
+    beginFarmMovement()
     C.FarmThread = task.spawn(function()
         while C.Farming do
             local hrp = getHRP()
-            if not hrp then task.wait(0.5); continue end
-            applyMode()
+            if not hrp then task.wait(0.3); continue end
+            if not hrp.Anchored then
+                beginFarmMovement()
+                task.wait(0.1)
+            end
             local coin = findNearestCoin()
             if coin then
                 local targetPos = coin.Position
                 local rotate90 = (C.FarmMode == "Lay" or C.FarmMode == "Safe")
-                if C.FarmMode == "Safe" then targetPos = targetPos - Vector3.new(0, 20, 0) end
-                smoothMove(targetPos, rotate90, C.FarmSpeed)
+                if C.FarmMode == "Safe" then targetPos = targetPos - Vector3.new(0, 25, 0) end
+                travelTo(targetPos, rotate90, C.FarmSpeed)
                 if coin.Parent then collect(coin) end
-                task.wait(0.15)
+                -- Sem wait: próxima moeda imediatamente
             else
-                task.wait(0.25)
+                task.wait(0.1)
             end
             local st = getStatValue()
             if st and st >= getBagThreshold() and tick() - C.LastFullAction > 3 then
                 C.LastFullAction = tick()
                 handleFullBag()
             end
-            task.wait(0.05)
         end
     end)
 end
 local function stopFarm()
     C.Farming = false
     if C.FarmThread then task.cancel(C.FarmThread); C.FarmThread = nil end
-    cancelMove()
-    resetMode()
+    endFarmMovement()
 end
 
--- ===================== SOURCE CAPTURE + REEXECUTION =====================
+-- ===================== SOURCE CAPTURE =====================
 local function captureSource()
     if getgenv().ASCRON_SOURCE then return true end
     local env = getgenv()
     local read = type(readfile) == "function" and readfile or env.readfile
     local write = type(writefile) == "function" and writefile or env.writefile
-
-    -- 1. Já foi salvo de uma execução anterior
     if read then
         local ok, existing = pcall(read, SOURCE_FILE)
         if ok and existing and #existing > 1000 then
             getgenv().ASCRON_SOURCE = existing
-            print("[ASCRON] Source carregada do arquivo salvo.")
+            print("[ASCRON] Source: carregada do arquivo (" .. #existing .. " bytes)")
             return true
         end
     end
-
     local function saveSrc(src)
         if not src or #src < 100 then return false end
         getgenv().ASCRON_SOURCE = src
         if write then pcall(write, SOURCE_FILE, src) end
-        print("[ASCRON] Source capturada e salva (" .. #src .. " bytes).")
+        print("[ASCRON] Source: capturada (" .. #src .. " bytes)")
         return true
     end
-
-    -- 2. debug.info(1, "s") - alguns executores modernos
     local ok1, info1 = pcall(function()
         if debug and debug.info then return debug.info(1, "s") end
     end)
@@ -582,8 +540,6 @@ local function captureSource()
             return saveSrc(info1)
         end
     end
-
-    -- 3. debug.getinfo(1, "S").source
     local ok2, info2 = pcall(function() return debug.getinfo(1, "S") end)
     if ok2 and info2 and info2.source then
         local s = info2.source
@@ -593,7 +549,6 @@ local function captureSource()
                 if ok and content then return saveSrc(content) end
             end
         elseif s:sub(1, 1) == "=" then
-            -- =[string "..."]
             local m = s:match('^=%[string "(.*)"%]$')
             if m and #m > 100 then
                 m = m:gsub('\\n', '\n'):gsub('\\t', '\t'):gsub('\\"', '"'):gsub("\\'", "'"):gsub('\\\\', '\\')
@@ -601,43 +556,62 @@ local function captureSource()
             end
         end
     end
-
-    -- 4. getscriptsource
     if type(getscriptsource) == "function" then
         local ok3, s = pcall(getscriptsource)
         if ok3 and type(s) == "string" then return saveSrc(s) end
     end
-
     return false
 end
 
 local function queueForReexecution()
     local source = getgenv().ASCRON_SOURCE
     if not source then return false end
-    -- syn.queue_on_teleport
     if syn and syn.queue_on_teleport then
         local ok = pcall(syn.queue_on_teleport, source)
-        if ok then print("[ASCRON] Queue via syn.queue_on_teleport."); return true end
+        if ok then print("[ASCRON] Queue: syn.queue_on_teleport"); return true end
     end
-    -- global queue_on_teleport
     if type(queue_on_teleport) == "function" then
         local ok = pcall(queue_on_teleport, source)
-        if ok then print("[ASCRON] Queue via queue_on_teleport."); return true end
+        if ok then print("[ASCRON] Queue: queue_on_teleport"); return true end
     end
-    -- getgenv().queue_on_teleport
     local g = getgenv()
     if g and type(g.queue_on_teleport) == "function" then
         local ok = pcall(g.queue_on_teleport, source)
-        if ok then print("[ASCRON] Queue via getgenv().queue_on_teleport."); return true end
+        if ok then print("[ASCRON] Queue: getgenv().queue_on_teleport"); return true end
     end
+    print("[ASCRON] Queue: NENHUM método de queue disponível")
     return false
 end
 
--- ===================== SERVER HOP =====================
+-- ===================== HTTP (multi-method) =====================
+local function httpGet(url)
+    local methods = {
+        function() return game:HttpGet(url) end,
+        function() if syn and syn.request then return syn.request({Url=url, Method="GET"}).Body end end,
+        function() if request then return request({Url=url, Method="GET"}).Body end end,
+        function() if http_request then return http_request({Url=url, Method="GET"}).Body end end,
+        function() if http and http.request then return http.request({Url=url, Method="GET"}).Body end end,
+    }
+    for i, fn in ipairs(methods) do
+        local ok, res = pcall(fn)
+        if ok and type(res) == "string" and #res > 0 then return res end
+    end
+    return nil
+end
+
+-- ===================== SERVER HOP (com diagnóstico) =====================
 local function getServerPool()
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
-    local ok, res = pcall(function() return HttpService:JSONDecode(game:HttpGet(url)) end)
-    if not ok or not res or not res.data then return {} end
+    local raw = httpGet(url)
+    if not raw then
+        print("[ASCRON] Hop: falha ao buscar servidores (HTTP)")
+        return {}
+    end
+    local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok or not res or not res.data then
+        print("[ASCRON] Hop: resposta HTTP inválida")
+        return {}
+    end
     local pool = {}
     for _, s in ipairs(res.data) do
         if s.id ~= game.JobId and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then
@@ -651,47 +625,76 @@ local function getServerPool()
     return pool
 end
 
-local function tryTeleportOnce()
-    local pool = getServerPool()
-    if #pool == 0 then return false end
-    -- Salva o source antes de sair
-    local queued = queueForReexecution()
-    if not queued then
-        warn("[ASCRON] !!! REEXECUTION IMPOSSÍVEL !!!")
-        warn("[ASCRON] Seu executor não tem queue_on_teleport ou a source não foi capturada.")
-        warn("[ASCRON] Se a source existe, ela está em: " .. SOURCE_FILE)
-        warn("[ASCRON] Ative Auto-Execute no seu executor OU reexecute manualmente após o teleporte.")
-        warn("[ASCRON] Teleporte será tentado mesmo assim (você precisa reexecutar manualmente).")
-    end
-
+local function tryTeleport(serverId)
     local failed = false
-    local failConn = TeleportService.TeleportInitFailed:Connect(function() failed = true end)
-    for _, srv in ipairs(pool) do
+    local failReason = nil
+    local conn = TeleportService.TeleportInitFailed:Connect(function(plr, _, reason)
+        if plr == LocalPlayer then failed = true; failReason = reason end
+    end)
+    local ok, result = pcall(function()
         local opts = Instance.new("TeleportOptions")
-        opts.ServerInstanceId = srv.id
-        failed = false
-        pcall(function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LocalPlayer, opts)
-        end)
-        local waitStart = tick()
-        while tick() - waitStart < 2 do
-            if failed then break end
-            task.wait(0.1)
-        end
-        if not failed then
-            failConn:Disconnect()
-            return true
-        end
+        opts.ServerInstanceId = serverId
+        return TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer, opts)
+    end)
+    if not ok then
+        conn:Disconnect()
+        return false, "erro: " .. tostring(result)
     end
-    failConn:Disconnect()
-    return false
+    if typeof(result) == "EnumItem" and result == Enum.TeleportState.Failed then
+        conn:Disconnect()
+        return false, "TeleportState = Failed"
+    end
+    local start = tick()
+    while tick() - start < 3 do
+        if failed then
+            conn:Disconnect()
+            return false, "TeleportInitFailed: " .. tostring(failReason)
+        end
+        task.wait(0.1)
+    end
+    conn:Disconnect()
+    return true
 end
 
 local function hop()
-    for attempt = 1, 5 do
-        if tryTeleportOnce() then return true end
-        task.wait(2)
+    print("[ASCRON] === Server Hop iniciado ===")
+    C.HopStatus = "buscando servidores..."
+    local pool = getServerPool()
+    print("[ASCRON] Servidores no pool: " .. #pool)
+    if #pool > 0 then
+        for i, srv in ipairs(pool) do
+            C.HopStatus = "tentando " .. i .. "/" .. #pool
+            print("[ASCRON] Tentativa " .. i .. "/" .. #pool .. ": " .. srv.id .. " (" .. srv.playing .. " plrs)")
+            local ok, reason = tryTeleport(srv.id)
+            if ok then
+                print("[ASCRON] Teleporte iniciado!")
+                C.HopStatus = "teleporte iniciado"
+                queueForReexecution()
+                return true
+            end
+            print("[ASCRON] Falhou: " .. tostring(reason))
+            task.wait(0.3)
+        end
     end
+    print("[ASCRON] Tentando fallback: Teleport(game.PlaceId)")
+    C.HopStatus = "fallback Teleport"
+    local failed = false
+    local conn = TeleportService.TeleportInitFailed:Connect(function(plr)
+        if plr == LocalPlayer then failed = true end
+    end)
+    local ok = pcall(function()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+    task.wait(3)
+    conn:Disconnect()
+    if ok and not failed then
+        print("[ASCRON] Fallback OK")
+        C.HopStatus = "fallback OK"
+        queueForReexecution()
+        return true
+    end
+    print("[ASCRON] Hop FALHOU em todas tentativas")
+    C.HopStatus = "FALHOU"
     return false
 end
 
@@ -712,9 +715,11 @@ local function startFriendMonitor()
     C.FriendThread = task.spawn(function()
         local ids = {}
         pcall(function()
-            local url = "https://friends.roblox.com/v1/users/" .. LocalPlayer.UserId .. "/friends"
-            local r = HttpService:JSONDecode(game:HttpGet(url))
-            if r and r.data then for _, f in ipairs(r.data) do ids[f.id] = true end end
+            local raw = httpGet("https://friends.roblox.com/v1/users/" .. LocalPlayer.UserId .. "/friends")
+            if raw then
+                local r = HttpService:JSONDecode(raw)
+                if r and r.data then for _, f in ipairs(r.data) do ids[f.id] = true end end
+            end
         end)
         while C.HopOnFriendJoin do
             task.wait(10)
@@ -781,9 +786,8 @@ local function startAutoVote()
             if C.AutoVoteMax > 0 and votes >= C.AutoVoteMax then task.wait(0.5); continue end
             local target = pickVotePad(open)
             if not target then task.wait(0.1); continue end
-            local char = getChar()
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local hrp = getHRP()
+            local hum = getHum()
             if not hum or not hrp or hum.Health <= 0 then task.wait(0.3); continue end
             if not insidePad(target.trigger, hrp.Position) then
                 hrp.CFrame = CFrame.new(target.trigger.Position + Vector3.new(0, 1, 0)) * hrp.CFrame.Rotation
@@ -822,10 +826,10 @@ local function findIndex(tbl, value) for i, v in ipairs(tbl) do if v == value th
 
 local function buildGui()
     local parent = getGuiParent()
-    if not parent then warn("[ASCRON] Sem parent para GUI."); return end
+    if not parent then warn("[ASCRON] Sem parent GUI."); return end
 
     local gui = Instance.new("ScreenGui")
-    gui.Name = "ASCRON_MM2_v12"
+    gui.Name = "ASCRON_MM2_v13"
     gui.ResetOnSpawn = false
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = 999999
@@ -851,7 +855,7 @@ local function buildGui()
     titleLbl.Size = UDim2.new(1, -80, 1, 0)
     titleLbl.Position = UDim2.new(0, 10, 0, 0)
     titleLbl.BackgroundTransparency = 1
-    titleLbl.Text = "ASCRON | MM2 v12"
+    titleLbl.Text = "ASCRON | MM2 v13"
     titleLbl.TextColor3 = Color3.fromRGB(255, 200, 0)
     titleLbl.Font = Enum.Font.GothamBold
     titleLbl.TextSize = 13
@@ -1066,8 +1070,8 @@ local function buildGui()
     makeLabel(mainTab, "— Currency —", nextOrder())
     makeCycle(mainTab, "Target", {"Coin","Candy","SnowToken","Token","Shell"}, C.Currency, nextOrder(), function(o) C.Currency = o end)
     makeLabel(mainTab, "— Movement —", nextOrder())
-    makeInput(mainTab, "Speed (studs/s, 8-45)", C.FarmSpeed, nextOrder(), function(v)
-        local n = tonumber(v); if n then C.FarmSpeed = math.clamp(n, 8, 45) end
+    makeInput(mainTab, "Speed (studs/s, 8-60)", C.FarmSpeed, nextOrder(), function(v)
+        local n = tonumber(v); if n then C.FarmSpeed = math.clamp(n, 8, 60) end
     end)
     makeCycle(mainTab, "Mode", {"Standard","Lay","Safe"}, C.FarmMode, nextOrder(), function(o) C.FarmMode = o end)
     makeLabel(mainTab, "— Bag —", nextOrder())
@@ -1126,6 +1130,22 @@ local function buildGui()
         local n = tonumber(v); if n then C.ServerHopPlayerCount = n end
     end)
     makeToggle(serverTab, "Hop when friend joins", C.HopOnFriendJoin, nextOrder(), function(s) C.HopOnFriendJoin = s; if s then startFriendMonitor() end end)
+    local hopStatusLbl = Instance.new("TextLabel")
+    hopStatusLbl.Size = UDim2.new(1, 0, 0, 24)
+    hopStatusLbl.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+    hopStatusLbl.BorderSizePixel = 0
+    hopStatusLbl.TextColor3 = Color3.fromRGB(255, 220, 100)
+    hopStatusLbl.Font = Enum.Font.Code
+    hopStatusLbl.TextSize = 10
+    hopStatusLbl.Text = "Status: idle"
+    hopStatusLbl.LayoutOrder = nextOrder()
+    hopStatusLbl.Parent = serverTab
+    task.spawn(function()
+        while hopStatusLbl.Parent do
+            task.wait(0.5)
+            hopStatusLbl.Text = "Status: " .. (C.HopStatus ~= "" and C.HopStatus or "idle")
+        end
+    end)
 
     order = 0
     local voteOptions = {"OFF","Smallest Map","Largest Map","Random"}
@@ -1144,6 +1164,15 @@ end
 
 -- ===================== INIT =====================
 captureSource()
+
+-- Reancoragem em respawn (mantém farm rodando)
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.3)
+    if C.Farming then
+        beginFarmMovement()
+    end
+end)
+
 startStatsTracker()
 if C.AntiAFK then startAntiAFK() end
 if C.AntiVoid then setupAntiVoid() end
@@ -1155,10 +1184,11 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[ASCRON] v12 pronta.")
+print("[ASCRON] v13 pronta.")
+print("[ASCRON] HWID: " .. HWID)
+print("[ASCRON] Prefs: " .. PREFS_FILE)
 if getgenv().ASCRON_SOURCE then
-    print("[ASCRON] Source capturada: " .. #getgenv().ASCRON_SOURCE .. " bytes (salva em " .. SOURCE_FILE .. ")")
+    print("[ASCRON] Source: " .. #getgenv().ASCRON_SOURCE .. " bytes → " .. SOURCE_FILE)
 else
-    warn("[ASCRON] Source NÃO capturada — reexecução após hop não vai funcionar.")
-    warn("[ASCRON] Ative Auto-Execute no executor OU salve o script como " .. SOURCE_FILE)
+    warn("[ASCRON] Source NÃO capturada. Reexecução não vai funcionar.")
 end
