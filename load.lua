@@ -1,7 +1,7 @@
--- Lambda Hub | v0.31 | By kerli
--- Fling fix | Predicted aimbot | Persist farm state | Robust hop | GUI Minimization Fix | Auto-launch
+-- Lambda Hub | v0.32 | By kerli
+-- Polished GUI | Fixed Autofarm | Fixed Server Hop | Auto-Start
 
-print("[Lambda] v0.31 loading")
+print("[Lambda] v0.32 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -9,7 +9,6 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
-local Debris = game:GetService("Debris")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UIS = game:GetService("UserInputService")
@@ -47,13 +46,13 @@ local C = getgenv().LAMBDA
 
 local DEFAULTS = {
     Currency="Coin", Speed=35, FarmMode="Stealth", Depth=3, AuraRadius=12, CoinAura=true,
-    HopAt=6, HopFriend=false, AutoLaunch=true, AutoRejoin=true, AutoGrabGun=true,
-    Farming=true,  -- PERSISTED farm state
+    HopAt=6, HopFriend=false, AutoLaunch=true, AutoGrabGun=true,
+    Farming=false,
     AntiAFK=true, AntiVoid=true, AntiFling=true, Noclip=true, AntiMurderer=false,
     Disable3D=false, VoteMode=0, VoteMax=0,
     ResetInnocent=true, FlingMurderer=false, ShootSheriff=true, ResetAnyRole=false,
     KillMurderer=true, ResetMurderer=false, Threshold=50, ResetAfterAction=true,
-    PredMultiplier=1.0,  -- Ping prediction multiplier
+    PredMultiplier=1.0,
     PrimaryColor="#FFC800", SecondaryColor="#1E1E1E",
     Visuals_ESP_Murderer=false, Visuals_TR_Murderer=false, Visuals_CH_Murderer=false, Visuals_OL_Murderer=false, Visuals_HL_Murderer=false, Visuals_BX_Murderer=false,
     Visuals_ESP_Sheriff=false,  Visuals_TR_Sheriff=false,  Visuals_CH_Sheriff=false,  Visuals_OL_Sheriff=false,  Visuals_HL_Sheriff=false,  Visuals_BX_Sheriff=false,
@@ -69,15 +68,15 @@ if C.Depth and C.Depth > 8 then C.Depth = 3 end
 if C.AuraRadius and C.AuraRadius < 5 then C.AuraRadius = 12 end
 
 C.FarmThread=nil
-C.HopThread=nil; C.FriendThread=nil; C.VoteThread=nil; C.AntiMurdererThread=nil
+C.HopThread=nil; C.FriendThread=nil; C.VoteThread=nil
 C.LastFull=tick(); C.Cooldown=0; C.HopStatus=""; C.LastKickReason=""
 C.IsHopping=false; C.IsTeleporting=false; C.IntentionalReset=false
 C.Stats={Total=0, Start=tick(), Last=0}
 C.MissCount=0; C.WasInRound=false
 C.CollectFails=0
-C.RejoinActive=false
 C.LastGunGrab=0
 C.FlingTarget=nil
+C.FarmStatus="idle"
 
 local function save() local t={} for k,_ in pairs(DEFAULTS) do t[k]=C[k] end prefsSave(t) end
 
@@ -163,78 +162,7 @@ local function hardReset()
     task.delay(1.5,function() C.IntentionalReset=false end)
 end
 
--- ============ Rejoin (getconnections kick hook) ============
-local RejoinState = { active=false }
-local function getRejoinDelay(reason)
-    reason=tostring(reason):lower()
-    if reason:find("exploit") or reason:find("cheat") or reason:find("hack") then return 5 end
-    if reason:find("position") or reason:find("bounds") then return 1 end
-    return 0.5
-end
-local function safeRejoin(reason)
-    if RejoinState.active then return end
-    if not C.AutoRejoin and reason~="manual" then return end
-    RejoinState.active=true; C.RejoinActive=true; C.LastKickReason=tostring(reason)
-    task.spawn(function()
-        for attempt=1,3 do
-            if C.IsHopping then break end
-            C.HopStatus="rejoin "..attempt.."/3"
-            local ok=pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
-            end)
-            if ok then task.wait(3); RejoinState.active=false; C.RejoinActive=false; return end
-            task.wait(getRejoinDelay(reason))
-        end
-        for attempt=1,3 do
-            if C.IsHopping then break end
-            C.HopStatus="recover "..attempt.."/3"
-            local ok=pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-            if ok then task.wait(3); RejoinState.active=false; C.RejoinActive=false; return end
-            task.wait(3)
-        end
-        C.HopStatus="recover FAILED"; RejoinState.active=false; C.RejoinActive=false
-    end)
-end
-
-pcall(function()
-    if type(getconnections) ~= "function" then return end
-    local conns = getconnections(LocalPlayer.Idled)
-    for _, c in ipairs(conns) do
-        pcall(function() if c.Disconnect then c:Disconnect() end end)
-    end
-end)
-
-pcall(function()
-    if not (getrawmetatable and setreadonly and newcclosure) then return end
-    local mt=getrawmetatable(game)
-    local oldNC=mt.__namecall; local oldNI=mt.__newindex
-    setreadonly(mt,false)
-    mt.__namecall=newcclosure(function(self,...)
-        local method=getnamecallmethod()
-        if method=="Kick" and self==LocalPlayer then
-            local args={...}; safeRejoin(tostring(args[1] or "unknown")); return nil
-        end
-        if C.AntiMurderer and not C.IntentionalReset then
-            local hum=HUM()
-            if hum and self==hum then
-                if method=="TakeDamage" then return 0 end
-                if method=="ChangeState" then local a={...}; if a[1]==Enum.HumanoidStateType.Dead then return nil end end
-            end
-        end
-        return oldNC(self,...)
-    end)
-    mt.__newindex=newcclosure(function(self,key,value)
-        if C.AntiMurderer and not C.IntentionalReset then
-            local hum=HUM()
-            if hum and self==hum and key=="Health" and value<=0 then
-                if murdererNearby() then return end
-            end
-        end
-        return oldNI(self,key,value)
-    end)
-    setreadonly(mt,true)
-end)
-
+-- Anti-AFK
 local afkConn
 local function startAFK()
     if afkConn then afkConn:Disconnect() end
@@ -243,6 +171,7 @@ local function startAFK()
     end)
 end
 
+-- Anti-Void
 local voidConn; local origDH=Workspace.FallenPartsDestroyHeight
 local function setupVoid()
     if not C.AntiVoid then Workspace.FallenPartsDestroyHeight=origDH; if voidConn then voidConn:Disconnect(); voidConn=nil end; return end
@@ -251,6 +180,7 @@ local function setupVoid()
     voidConn=LocalPlayer.CharacterAdded:Connect(function() task.wait(0.1); Workspace.FallenPartsDestroyHeight=0/0 end)
 end
 
+-- Anti-Fling
 local function startAntiFling()
     local lastP,lastT=nil,tick(); local lastC=nil
     RunService.Heartbeat:Connect(function()
@@ -272,6 +202,7 @@ local function startAntiFling()
     end)
 end
 
+-- Noclip
 local noclipConn
 local function startNoclip()
     if noclipConn then noclipConn:Disconnect() end
@@ -337,6 +268,16 @@ local coinCache={parts={},ts=0}
 local coinBlacklist={}
 local function isBlacklisted(c) local t=coinBlacklist[c]; if not t then return false end; if tick()-t>5 then coinBlacklist[c]=nil; return false end; return true end
 local function blacklist(c) if c then coinBlacklist[c]=tick() end; for k,v in pairs(coinBlacklist) do if tick()-v>5 then coinBlacklist[k]=nil end end end
+local function removeCoinFromCache(coin)
+    for i, p in ipairs(coinCache.parts) do
+        if p == coin then
+            table.remove(coinCache.parts, i)
+            break
+        end
+    end
+    blacklist(coin)
+end
+
 local function getContainers()
     local list={}
     for _,o in ipairs(Workspace:GetChildren()) do
@@ -408,13 +349,15 @@ local function collectNormal(coin, rot90)
     if not coin.Parent then return true end
     local bv,bg,wasA,curU=unanchorForTouch(rot90); if not bv then return false end
     local got=false; local start=tick(); local statBefore=statValue()
-    while tick()-start<0.8 and C.Farming do
+    while tick()-start<1.5 and C.Farming do
         if not coin.Parent then got=true; break end
         pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end)
-        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; blacklist(coin); break end
-        task.wait(0.015)
+        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; break end
+        task.wait(0.05)
     end
-    reanchorAfterTouch(bv,bg,wasA,curU); return got
+    reanchorAfterTouch(bv,bg,wasA,curU); 
+    if got then removeCoinFromCache(coin) end
+    return got
 end
 
 local function collectStealth(coin)
@@ -423,21 +366,22 @@ local function collectStealth(coin)
     if (h.Position-target).Magnitude>2.5 then if not travel(target,true,C.Speed,coin) then return false end end
     local bv,bg,wasA,curU=unanchorForTouch(true); if not bv then return false end
     local got=false; local start=tick(); local statBefore=statValue()
-    while tick()-start<1.0 and C.Farming do
+    while tick()-start<1.5 and C.Farming do
         if not coin.Parent then got=true; break end
         if C.CoinAura then
             for _,c in ipairs(getCoins()) do if c.Parent and not isBlacklisted(c) then local d=(h.Position-c.Position).Magnitude; if d<=C.AuraRadius then pcall(function() firetouchinterest(h,c,0); firetouchinterest(h,c,1) end) end end end
         else
             pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end)
         end
-        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; blacklist(coin); break end
-        task.wait(0.015)
+        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; break end
+        task.wait(0.05)
     end
     if not got and coin.Parent and C.Farming then
         reanchorAfterTouch(bv,bg,wasA,curU); travel(coin.Position,true,C.Speed*1.5,coin)
         local bv2,bg2,wasA2,curU2=unanchorForTouch(true)
-        if bv2 then local s2=tick(); while tick()-s2<0.5 and C.Farming do if not coin.Parent then got=true; break end; pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end); task.wait(0.015) end; reanchorAfterTouch(bv2,bg2,wasA2,curU2) end
+        if bv2 then local s2=tick(); while tick()-s2<0.5 and C.Farming do if not coin.Parent then got=true; break end; pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end); task.wait(0.05) end; reanchorAfterTouch(bv2,bg2,wasA2,curU2) end
     else reanchorAfterTouch(bv,bg,wasA,curU) end
+    if got then removeCoinFromCache(coin) end
     return got
 end
 
@@ -496,10 +440,8 @@ local function killAll()
     end
 end
 
--- ============ FLING (AFP-style with PhysicsRepRootRef) ============
+-- ============ FLING ============
 local function touch(a,b) pcall(function() firetouchinterest(a,b,0); firetouchinterest(a,b,1) end) end
-local function setRootRef(root, target) pcall(function() sethiddenproperty(root,"PhysicsRepRootRef",InstanceHandle.new(target)); sethiddenproperty(root,"PhysicsRepRootPart",target) end) end
-local function clearRootRef(root) pcall(function() sethiddenproperty(root,"PhysicsRepRootRef",nil); sethiddenproperty(root,"PhysicsRepRootPart",nil) end) end
 
 local function flingTarget(targetPlayer)
     if not targetPlayer or not targetPlayer.Character then return false end
@@ -540,7 +482,7 @@ local function flingLoop(targetPlayer)
     end
 end
 
--- ============ SHOOT (predicted aimbot) ============
+-- ============ SHOOT ============
 local function getPing()
     local ok, ping = pcall(function()
         return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
@@ -553,7 +495,6 @@ local function shootAtMurderer()
     local m=findMurderer(); if not m or not m.Character then return false end
     local mHrp=m.Character:FindFirstChild("HumanoidRootPart")
     local mHead=m.Character:FindFirstChild("Head")
-    local mUpper=m.Character:FindFirstChild("UpperTorso")
     local hrp=HRP(); if not mHrp or not hrp then return false end
     local cam=workspace.CurrentCamera; if not cam then return false end
 
@@ -709,9 +650,15 @@ local function farmLoopFn()
                 if not h.Anchored then h.Anchored=true; u.PlatformStand=true; u.AutoRotate=false end
                 got=collectNormal(coin,false)
             end
-            if got then C.CollectFails=0; coinCache.ts=0
-            elseif coin.Parent then blacklist(coin); C.CollectFails=C.CollectFails+1
-            else C.CollectFails=0; coinCache.ts=0 end
+            if got then 
+                C.CollectFails=0
+                removeCoinFromCache(coin)
+            elseif coin.Parent then 
+                blacklist(coin); C.CollectFails=C.CollectFails+1
+            else 
+                C.CollectFails=0
+            end
+            coinCache.ts = 0
             task.wait(0.02)
         else C.FarmStatus="no coins"; cleanup(); task.wait(0.3) end
 
@@ -735,79 +682,53 @@ local function stopFarm()
 end
 
 -- ============ HOP ============
-local function httpGet(u)
-    local success, result = pcall(function()
-        if request then return request({Url=u, Method="GET"}).Body end
-        if syn and syn.request then return syn.request({Url=u, Method="GET"}).Body end
-        if http_request then return http_request({Url=u, Method="GET"}).Body end
-        return game:HttpGet(u)
-    end)
-    return success and result or nil
-end
-
-local function pool()
-    local raw = httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId))
-    if not raw then return {} end
-    local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
-    if not ok or not res or not res.data then return {} end
-    local t = {}
-    for _, s in ipairs(res.data) do 
-        if s.id ~= game.JobId and s.playing >= 1 and s.playing < s.maxPlayers then 
-            table.insert(t, s) 
-        end 
-    end
-    return t
-end
-
-local function tryTeleport(serverId)
-    local failed = false
-    local conn = TeleportService.TeleportInitFailed:Connect(function(plr) 
-        if plr == LocalPlayer then failed = true end 
-    end)
-    
-    local ok = false
-    if serverId then
-        ok = pcall(function() 
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer) 
-        end)
-    else
-        ok = pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-    end
-    
-    task.wait(3)
-    pcall(function() conn:Disconnect() end)
-    return ok and not failed
-end
-
 local function hop()
     if C.IsHopping then return false end
-    C.IsHopping=true; C.IsTeleporting=true; C.HopStatus="fetch"
-    local list=pool()
-    if #list==0 then C.HopStatus="fallback"; local ok=tryTeleport(nil); C.HopStatus=ok and "fallback OK" or "FAILED"; task.wait(2); C.IsHopping=false; C.IsTeleporting=false; return ok end
-    for i,s in ipairs(list) do
-        C.HopStatus=string.format("try %d/%d",i,#list)
-        if tryTeleport(s.id) then C.HopStatus="OK"; task.wait(2); C.IsHopping=false; C.IsTeleporting=false; return true end
-        task.wait(0.3)
+    C.IsHopping=true; C.IsTeleporting=true; C.HopStatus="fetching"
+    
+    local servers = {}
+    local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+    local success, result = pcall(function() return game:HttpGet(url) end)
+    
+    if success and result then
+        local ok, res = pcall(function() return HttpService:JSONDecode(result) end)
+        if ok and res and res.data then
+            for _, s in ipairs(res.data) do
+                if s.id ~= game.JobId and s.playing < s.maxPlayers then
+                    table.insert(servers, s.id)
+                end
+            end
+        end
     end
-    C.HopStatus="fallback"; local ok=tryTeleport(nil); C.HopStatus=ok and "fallback OK" or "FAILED"; task.wait(2); C.IsHopping=false; C.IsTeleporting=false; return ok
+    
+    if #servers == 0 then
+        C.HopStatus="fallback"
+        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+        task.wait(5)
+        C.IsHopping=false; C.IsTeleporting=false
+        return
+    end
+    
+    local targetServer = servers[math.random(1, #servers)]
+    C.HopStatus="hopping"
+    
+    local options = Instance.new("TeleportOptions")
+    options.ServerInstanceId = targetServer
+    
+    pcall(function() TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options) end)
+    task.wait(5)
+    C.IsHopping=false; C.IsTeleporting=false
 end
-local function hopNow() if C.IsHopping or RejoinState.active then return end task.spawn(hop) end
+
+local function hopNow() if C.IsHopping then return end task.spawn(hop) end
 local function hopMonitor()
     if C.HopThread then return end
     C.HopThread=task.spawn(function()
-        while C.HopAt>0 do task.wait(5); if not C.IsHopping and not RejoinState.active and #Players:GetPlayers()>C.HopAt then hop(); break end end
-    end)
-end
-local function friendMonitor()
-    if C.FriendThread then return end
-    C.FriendThread=task.spawn(function()
-        local ids={}
-        pcall(function() local raw=httpGet("https://friends.roblox.com/v1/users/"..LocalPlayer.UserId.."/friends"); if raw then local r=HttpService:JSONDecode(raw); if r and r.data then for _,f in ipairs(r.data) do ids[f.id]=true end end end end)
-        while C.HopFriend do task.wait(10); for _,p in ipairs(Players:GetPlayers()) do if p~=LocalPlayer and ids[p.UserId] then hop(); break end end end
+        while C.HopAt>0 do task.wait(5); if not C.IsHopping and #Players:GetPlayers()>C.HopAt then hop(); break end end
     end)
 end
 
--- ============ AUTO-VOTE (compact) ============
+-- ============ AUTO-VOTE ============
 local VOTE_PADS={"VotePad1","VotePad2","VotePad3"}
 local MAPS={"Manor","House 2","Office 3","Hospital 3","Bank 2","Vampire's Castle","Mansion 2","WorkPlace","Hotel 2","Farm House","Police Station","Factory","Bio Lab","Research Facility","Mil Base"}
 local function norm(s) s=string.lower(s):gsub("-"," "):gsub("%s+"," "); return s:match("^%s*(.-)%s*$") end
@@ -850,7 +771,7 @@ local function startVote()
 end
 local function stopVote() C.VoteMode=0; if C.VoteThread then task.cancel(C.VoteThread); C.VoteThread=nil end end
 
--- ============ VISUALS (compact) ============
+-- ============ VISUALS ============
 local ROLE_COLORS={Murderer=Color3.fromRGB(255,40,40),Sheriff=Color3.fromRGB(40,140,255),Hero=Color3.fromRGB(255,200,50),Innocent=Color3.fromRGB(60,255,80),Unknown=Color3.fromRGB(200,200,200)}
 local COIN_COL=Color3.fromRGB(255,215,0); local GUN_COL=Color3.fromRGB(255,100,255)
 local hasDrawing=(function() local ok,d=pcall(function() return Drawing.new("Square") end); if ok and d then pcall(function() d:Remove() end); return true end; return false end)()
@@ -977,20 +898,45 @@ function buildGui()
 
     local main=Instance.new("Frame"); main.Size=UDim2.new(0,390,0,520); main.Position=UDim2.new(0,30,0,30); main.BackgroundColor3=SECONDARY; main.BorderSizePixel=0; main.Active=true; main.Draggable=true; main.Parent=gui
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,28); titleBar.BackgroundColor3=SECONDARY; titleBar.BorderSizePixel=0; titleBar.Parent=main
-    local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0); title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.31"; title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
+    local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0); title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.32"; title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
     local min=Instance.new("TextButton"); min.Size=UDim2.new(0,24,0,20); min.Position=UDim2.new(1,-56,0,4); min.BackgroundColor3=Color3.fromRGB(70,70,70); min.Text="—"; min.TextColor3=Color3.fromRGB(255,255,255); min.Font=Enum.Font.GothamBold; min.TextSize=13; min.Parent=titleBar
     local close=Instance.new("TextButton"); close.Size=UDim2.new(0,24,0,20); close.Position=UDim2.new(1,-28,0,4); close.BackgroundColor3=Color3.fromRGB(120,30,30); close.Text="X"; close.TextColor3=Color3.fromRGB(255,255,255); close.Font=Enum.Font.GothamBold; close.TextSize=13; close.Parent=titleBar
     
-    local statusBar=Instance.new("Frame"); statusBar.Size=UDim2.new(1,0,0,40); statusBar.Position=UDim2.new(0,0,1,-40); statusBar.BackgroundColor3=SECONDARY; statusBar.BorderSizePixel=0; statusBar.Visible=false; statusBar.Parent=main
-    local stats=Instance.new("TextLabel"); stats.Size=UDim2.new(1,-10,1,0); stats.Position=UDim2.new(0,5,0,0); stats.BackgroundTransparency=1; stats.TextColor3=PRIMARY; stats.Font=Enum.Font.Code; stats.TextSize=10; stats.TextXAlignment=Enum.TextXAlignment.Left; stats.TextYAlignment=Enum.TextYAlignment.Center; stats.Text="Collected: 0 | Per hour: 0 | Bag: ?/50 | Fails: 0 | Status: idle"; stats.Parent=statusBar
+    local statusBar=Instance.new("Frame"); 
+    statusBar.Size=UDim2.new(1,0,0,52); 
+    statusBar.Position=UDim2.new(0,0,0,28); 
+    statusBar.BackgroundColor3=Color3.fromRGB(20,20,20); 
+    statusBar.BorderSizePixel=0; 
+    statusBar.Visible=false; 
+    statusBar.Parent=main
+    
+    local stats=Instance.new("TextLabel"); 
+    stats.Size=UDim2.new(1,-10,1,0); 
+    stats.Position=UDim2.new(0,5,0,0); 
+    stats.BackgroundTransparency=1; 
+    stats.TextColor3=PRIMARY; 
+    stats.Font=Enum.Font.Code; 
+    stats.TextSize=11; 
+    stats.TextXAlignment=Enum.TextXAlignment.Left; 
+    stats.TextYAlignment=Enum.TextYAlignment.Center; 
+    stats.Text="Collected: 0 | Per hour: 0 | Bag: ?/50 | Fails: 0 | Status: idle"; 
+    stats.Parent=statusBar
 
     local collapsed=false
     min.MouseButton1Click:Connect(function() 
         collapsed=not collapsed
         if collapsed then
-            main.Size=UDim2.new(0,390,0,68); content.Visible=false; tabBar.Visible=false; statusBar.Visible=true; min.Text="+"
+            main.Size=UDim2.new(0,390,0,80); 
+            content.Visible=false; 
+            tabBar.Visible=false; 
+            statusBar.Visible=true; 
+            min.Text="+"
         else
-            main.Size=UDim2.new(0,390,0,520); content.Visible=true; tabBar.Visible=true; statusBar.Visible=false; min.Text="—"
+            main.Size=UDim2.new(0,390,0,520); 
+            content.Visible=true; 
+            tabBar.Visible=true; 
+            statusBar.Visible=false; 
+            min.Text="—"
         end
     end)
     close.MouseButton1Click:Connect(function()
@@ -1025,6 +971,7 @@ function buildGui()
         local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-60,1,0); l.BackgroundTransparency=1; l.Text=txt; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=12; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
         local b=Instance.new("TextButton"); b.Size=UDim2.new(0,48,0,20); b.Position=UDim2.new(1,-52,0.5,-10); b.BackgroundColor3=init and PRIMARY or Color3.fromRGB(55,55,55); b.Text=init and "ON" or "OFF"; b.TextColor3=init and Color3.fromRGB(0,0,0) or Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=10; b.Parent=row
         local st=init; b.MouseButton1Click:Connect(function() st=not st; b.BackgroundColor3=st and PRIMARY or Color3.fromRGB(55,55,55); b.Text=st and "ON" or "OFF"; b.TextColor3=st and Color3.fromRGB(0,0,0) or Color3.fromRGB(255,255,255); pcall(function() cb(st) end); save() end)
+        return b
     end
     local function inp(par,label,val,ord,cb)
         local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,24); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
@@ -1065,7 +1012,7 @@ function buildGui()
     local o=0; local function no() o=o+1; return o end
 
     -- MAIN
-    tog(mainTab,"AUTO FARM",C.Farming,no(),function(s) if s then farm() else stopFarm() end end)
+    local farmBtn = tog(mainTab,"AUTO FARM",C.Farming,no(),function(s) if s then farm() else stopFarm() end end)
     tog(mainTab,"Auto-launch on exec",C.AutoLaunch,no(),function(s) C.AutoLaunch=s end)
     lbl(mainTab,"— Currency —",no()); cyc(mainTab,"Target",{"Coin","Candy","SnowToken","Token","Shell"},C.Currency,no(),function(v) C.Currency=v end)
     lbl(mainTab,"— Movement —",no()); inp(mainTab,"Speed (studs/s)",C.Speed,no(),function(v) local n=tonumber(v); if n then C.Speed=math.clamp(n,10,70) end end)
@@ -1076,10 +1023,13 @@ function buildGui()
     lbl(mainTab,"— Bag —",no()); inp(mainTab,"Threshold (50=default)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
     
     task.spawn(function() 
-        while stats.Parent do 
+        while stats and stats.Parent do 
             task.wait(0.5)
             local b=statValue()
-            stats.Text=string.format("Collected: %d | Per hour: %d | Bag: %s/%d | Fails: %d | Status: %s",C.Stats.Total,rate(),b and tostring(b) or "?",threshold(),C.CollectFails,C.FarmStatus or "idle") 
+            local rateVal = rate()
+            local thresh = threshold()
+            stats.Text=string.format("Collected: %d | Per hour: %d | Bag: %s/%d | Fails: %d | Status: %s",
+                C.Stats.Total, rateVal, b and tostring(b) or "?", thresh, C.CollectFails, C.FarmStatus or "idle") 
         end 
     end)
 
@@ -1147,13 +1097,10 @@ function buildGui()
 
     -- SERVER
     o=0
-    tog(serverTab,"Auto-rejoin on kick",C.AutoRejoin,no(),function(s) C.AutoRejoin=s end)
     inp(serverTab,"Hop if players >",C.HopAt,no(),function(v) local n=tonumber(v); if n then C.HopAt=n end end)
-    tog(serverTab,"Hop when friend joins",C.HopFriend,no(),function(s) C.HopFriend=s; if s then friendMonitor() end end)
     btn(serverTab,"HOP NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
-    btn(serverTab,"REJOIN NOW",Color3.fromRGB(80,80,80),Color3.fromRGB(255,255,255),no(),function() safeRejoin("manual") end)
     local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,36); hopLbl.BackgroundColor3=Color3.fromRGB(28,28,28); hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=10; hopLbl.Text="Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab
-    task.spawn(function() while hopLbl.Parent do task.wait(0.5); local s="Status: "..(C.HopStatus~="" and C.HopStatus or "idle"); if C.LastKickReason~="" then s=s.."\nLast kick: "..C.LastKickReason end; hopLbl.Text=s end end)
+    task.spawn(function() while hopLbl.Parent do task.wait(0.5); local s="Status: "..(C.HopStatus~="" and C.HopStatus or "idle"); hopLbl.Text=s end end)
 
     -- VOTE
     o=0
@@ -1183,13 +1130,8 @@ function buildGui()
     btn(themeTab,"APPLY / REBUILD GUI",PRIMARY,Color3.fromRGB(0,0,0),no(),function() buildGui() end)
 
     tabs["Main"].btn.MouseButton1Click:Fire()
-end
-
-local function dismissMobilePicker()
-    if not UIS.TouchEnabled then return end
-    local cam=workspace.CurrentCamera; local vp=cam and cam.ViewportSize or Vector2.new(800,600)
-    for _=1,3 do pcall(function() VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,true,game,0); task.wait(0.08); VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,false,game,0) end); task.wait(0.5) end
-    pcall(function() VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Return,false,game); task.wait(0.1); VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Return,false,game) end)
+    
+    return farmBtn
 end
 
 -- ============ INIT ============
@@ -1205,19 +1147,24 @@ if C.AntiVoid then setupVoid() end
 if C.AntiFling then startAntiFling() end
 if C.Noclip then startNoclip() end
 if C.HopAt>0 then hopMonitor() end
-if C.HopFriend then friendMonitor() end
-if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end) end
 
-buildGui()
+local farmBtnRef = buildGui()
 
 -- Auto-launch: automatically start farming upon execution
 task.spawn(function()
-    task.wait(3); dismissMobilePicker(); task.wait(1)
-    print("[Lambda] Auto-launch: starting farm automatically")
-    C.Farming=true
-    farm()
+    task.wait(5)
+    if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
+    task.wait(2)
+    
+    if C.AutoLaunch then
+        C.Farming = true
+        farm()
+        if farmBtnRef then
+            farmBtnRef.BackgroundColor3 = PRIMARY
+            farmBtnRef.Text = "ON"
+            farmBtnRef.TextColor3 = Color3.fromRGB(0,0,0)
+        end
+    end
 end)
 
-print("[Lambda] v0.31 ready | HWID: "..HWID)
-print("[Lambda] Depth="..C.Depth.." AuraRadius="..C.AuraRadius.." CoinAura="..tostring(C.CoinAura))
-print("[Lambda] PredMultiplier="..C.PredMultiplier.." Farming(saved)="..tostring(C.Farming))
+print("[Lambda] v0.32 ready | HWID: "..HWID)
