@@ -1,7 +1,7 @@
--- Lambda Hub | v0.22 | By kerli
--- Server hop sem crash | Reexec via URL | Threshold 50 default
+-- Lambda Hub | v0.24 | By kerli
+-- Auto-rejoin em kick | Position watchdog | Fallback faseado
 
-print("[Lambda] v0.22 loading")
+print("[Lambda] v0.24 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -12,34 +12,32 @@ local Workspace = game:GetService("Workspace")
 local Debris = game:GetService("Debris")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local UIS = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
 local function hwid()
     local ok, id = pcall(function() return gethwid() end)
-    if ok and type(id) == "string" and #id > 0 then return id end
+    if ok and type(id)=="string" and #id>0 then return id end
     local ok2, cid = pcall(function() return game:GetService("RbxAnalyticsService"):GetClientId() end)
-    if ok2 and type(cid) == "string" and #cid > 0 then return cid end
+    if ok2 and type(cid)=="string" and #cid>0 then return cid end
     return tostring(LocalPlayer.UserId)
 end
 local HWID = hwid()
-local PREFS = "LAMBDA_HUB_" .. (HWID:gsub("[^%w_%-]", "_")) .. ".json"
-local SRC = "LAMBDA_SOURCE.lua"
+local PREFS = "LAMBDA_HUB_"..(HWID:gsub("[^%w_%-]","_"))..".json"
 
-local function env() local e = {}; pcall(function() local g = getgenv(); if type(g)=="table" then e=g end end); return e end
+local function env() local e={}; pcall(function() local g=getgenv(); if type(g)=="table" then e=g end end); return e end
 local function prefsLoad()
-    local e = env()
-    local rd = type(readfile) == "function" and readfile or e.readfile
+    local e=env(); local rd=type(readfile)=="function" and readfile or e.readfile
     if not rd then return nil end
-    local ok, d = pcall(rd, PREFS)
-    if ok and d then local ok2, dec = pcall(function() return HttpService:JSONDecode(d) end); if ok2 then return dec end end
+    local ok,d=pcall(rd,PREFS)
+    if ok and d then local ok2,dec=pcall(function() return HttpService:JSONDecode(d) end); if ok2 then return dec end end
     return nil
 end
 local function prefsSave(t)
-    local e = env()
-    local wr = type(writefile) == "function" and writefile or e.writefile
+    local e=env(); local wr=type(writefile)=="function" and writefile or e.writefile
     if not wr then return end
-    local ok, enc = pcall(function() return HttpService:JSONEncode(t) end)
-    if ok then pcall(wr, PREFS, enc) end
+    local ok,enc=pcall(function() return HttpService:JSONEncode(t) end)
+    if ok then pcall(wr,PREFS,enc) end
 end
 
 getgenv().LAMBDA = getgenv().LAMBDA or {}
@@ -47,12 +45,11 @@ local C = getgenv().LAMBDA
 
 local DEFAULTS = {
     Currency="Coin", Speed=35, FarmMode="Stealth", Depth=18, CoinRise=4,
-    HopAt=6, HopFriend=false,
+    HopAt=6, HopFriend=false, AutoLaunch=true, AutoRejoin=true,
     AntiAFK=true, AntiVoid=true, AntiFling=true, Noclip=true, AntiMurderer=false,
     Disable3D=false, VoteMode=0, VoteMax=0,
     ResetInnocent=true, FlingMurderer=false, ShootSheriff=true, ResetAnyRole=false,
     KillMurderer=true, ResetMurderer=false, Threshold=50, ResetAfterAction=true,
-    ReexecURL="",
     ESPOn=false, TracersOn=false, ChamsOn=false, OutlinesOn=false,
     ShowMurderer=true, ShowSheriff=true, ShowHero=true, ShowInnocent=true,
     CoinESP=false, GunESP=false,
@@ -64,25 +61,26 @@ if saved then for k,v in pairs(saved) do if C[k]~=nil then C[k]=v end end end
 
 C.Farming=false; C.FarmStatus="idle"; C.FarmThread=nil
 C.HopThread=nil; C.FriendThread=nil; C.VoteThread=nil; C.AntiMurdererThread=nil
-C.LastFull=tick(); C.Cooldown=0; C.HopStatus=""
-C.IsHopping=false; C.IsTeleporting=false
+C.LastFull=tick(); C.Cooldown=0; C.HopStatus=""; C.LastKickReason=""
+C.IsHopping=false; C.IsTeleporting=false; C.IntentionalReset=false
 C.Stats={Total=0, Start=tick(), Last=0}
 C.MissCount=0; C.WasInRound=false
 C.CollectFails=0
+C.RejoinActive=false
 
 local function save() local t={} for k,_ in pairs(DEFAULTS) do t[k]=C[k] end prefsSave(t) end
 
 local function parseHex(s)
-    s = tostring(s or ""):gsub("#","")
-    if #s ~= 6 then return nil end
-    local n = tonumber(s, 16); if not n then return nil end
-    local r = bit32.rshift(bit32.band(n, 0xFF0000), 16)
-    local g = bit32.rshift(bit32.band(n, 0x00FF00), 8)
-    local b = bit32.band(n, 0x0000FF)
-    return Color3.fromRGB(r, g, b)
+    s=tostring(s or ""):gsub("#","")
+    if #s~=6 then return nil end
+    local n=tonumber(s,16); if not n then return nil end
+    return Color3.fromRGB(bit32.rshift(bit32.band(n,0xFF0000),16), bit32.rshift(bit32.band(n,0x00FF00),8), bit32.band(n,0x0000FF))
 end
-local PRIMARY = parseHex(C.PrimaryColor) or Color3.fromRGB(255, 200, 0)
-local SECONDARY = parseHex(C.SecondaryColor) or Color3.fromRGB(30, 30, 30)
+local function colorToHex(c)
+    return string.format("#%02X%02X%02X", math.floor(c.R*255+.5), math.floor(c.G*255+.5), math.floor(c.B*255+.5))
+end
+local PRIMARY = parseHex(C.PrimaryColor) or Color3.fromRGB(255,200,0)
+local SECONDARY = parseHex(C.SecondaryColor) or Color3.fromRGB(30,30,30)
 local TEXT_DIM = Color3.fromRGB(150,150,150)
 local TEXT_BRIGHT = Color3.fromRGB(220,220,220)
 
@@ -90,12 +88,12 @@ local function HRP() local c=LocalPlayer.Character; return c and c:FindFirstChil
 local function HUM() local c=LocalPlayer.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 
 -- ============ Background GetPlayerData ============
-local pdCache = { data=nil, ts=0 }
+local pdCache={data=nil,ts=0}
 task.spawn(function()
     while true do
         task.wait(0.75)
-        local ok, data = pcall(function()
-            local r = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+        local ok,data=pcall(function()
+            local r=ReplicatedStorage:FindFirstChild("GetPlayerData",true)
             if r and r:IsA("RemoteFunction") then return r:InvokeServer() end
         end)
         if ok and data then pdCache.data=data; pdCache.ts=tick() end
@@ -103,25 +101,41 @@ task.spawn(function()
 end)
 local function PD() return pdCache.data end
 
-local function inRound()
-    local d = PD()
-    if not d then return true end
-    local me = d[LocalPlayer.Name]
-    if not me then return true end
-    if me.Dead==true or me.Killed==true then return false end
-    if me.Role=="None" then return false end
-    return true
+local function isDeadOrOutOfRound()
+    local hum=HUM()
+    if not hum then return true end
+    if hum.Health<=0 then return true end
+    if hum:GetState()==Enum.HumanoidStateType.Dead then return true end
+    local d=PD()
+    if d then
+        local me=d[LocalPlayer.Name]
+        if me then
+            if me.Dead==true or me.Killed==true then return true end
+            if me.Role=="None" then return true end
+        end
+    end
+    return false
 end
 
 local function findMurderer()
-    local d = PD(); if not d then return nil end
-    for n, i in pairs(d) do
+    local d=PD(); if not d then return nil end
+    for n,i in pairs(d) do
         if i.Role=="Murderer" and not i.Killed and not i.Dead then
-            local p = Players:FindFirstChild(n)
+            local p=Players:FindFirstChild(n)
             if p and p~=LocalPlayer then return p end
         end
     end
     return nil
+end
+
+local function murdererNearby(radius)
+    radius=radius or 40
+    local m=findMurderer()
+    if not m or not m.Character then return false end
+    local mh=m.Character:FindFirstChild("HumanoidRootPart")
+    local myh=HRP()
+    if not mh or not myh then return false end
+    return (mh.Position-myh.Position).Magnitude<=radius
 end
 
 local function cleanup()
@@ -129,29 +143,156 @@ local function cleanup()
     local u=HUM(); if u then u.PlatformStand=false; u.AutoRotate=true end
 end
 local function hardReset()
+    C.IntentionalReset=true
     local h=HRP(); if h then pcall(function() h.Anchored=false end) end
     local u=HUM(); if u then u.PlatformStand=false; u.AutoRotate=true; if u.Health>0 then u.Health=0 end end
+    task.delay(1.5,function() C.IntentionalReset=false end)
 end
 
--- ============ Bag (threshold 50 default) ============
-local EVENT_CURR = { Candy=true, SnowToken=true, Token=true, Shell=true, Egg=true, Present=true, Gift=true, Gem=true }
+-- ============ Rejoin (auto-recovery) ============
+local RejoinState = { active=false, attempts=0 }
+
+local function getRejoinDelay(reason)
+    reason=tostring(reason):lower()
+    if reason:find("exploit") or reason:find("cheat") or reason:find("hack") or reason:find("kick") then return 5 end
+    if reason:find("position") or reason:find("bounds") or reason:find("out of") then return 1 end
+    return 0.5
+end
+
+local function safeRejoin(reason)
+    if RejoinState.active then return end
+    if not C.AutoRejoin and reason ~= "manual" then
+        print("[Lambda] Kick ignored (auto-rejoin off): " .. tostring(reason))
+        return
+    end
+    RejoinState.active = true
+    C.RejoinActive = true
+    C.LastKickReason = tostring(reason)
+    print("[Lambda] Rejoin initiated: " .. tostring(reason))
+    task.spawn(function()
+        -- Phase 1: rejoin same server (2 attempts)
+        for attempt = 1, 2 do
+            if C.IsHopping then break end
+            C.HopStatus = "rejoin " .. attempt .. "/2"
+            local ok = pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+            end)
+            if ok then
+                task.wait(3)
+                RejoinState.active = false
+                C.RejoinActive = false
+                return
+            end
+            task.wait(getRejoinDelay(reason))
+        end
+        -- Phase 2: hop to any server (3 attempts)
+        for attempt = 1, 3 do
+            if C.IsHopping then break end
+            C.HopStatus = "recover " .. attempt .. "/3"
+            local ok = pcall(function()
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
+            end)
+            if ok then
+                task.wait(3)
+                RejoinState.active = false
+                C.RejoinActive = false
+                return
+            end
+            task.wait(3)
+        end
+        C.HopStatus = "recover FAILED"
+        warn("[Lambda] Rejoin failed after 5 attempts (network likely down)")
+        RejoinState.active = false
+        C.RejoinActive = false
+    end)
+end
+
+-- ============ Position watchdog (prevents invalid-position kick) ============
+local lastSafePos = nil
+RunService.Heartbeat:Connect(function()
+    local hrp = HRP(); if not hrp then return end
+    local p = hrp.Position
+    if p.Y > -100 and p.Y < 5000 and math.abs(p.X) < 5000 and math.abs(p.Z) < 5000 then
+        lastSafePos = p
+    elseif lastSafePos and (p.Y < -500 or p.Y > 50000 or math.abs(p.X) > 100000 or math.abs(p.Z) > 100000) then
+        pcall(function()
+            hrp.CFrame = CFrame.new(lastSafePos + Vector3.new(0, 5, 0))
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+end)
+
+-- ============ Metatable hooks: kick rejoin + anti-kill ============
+pcall(function()
+    if not (getrawmetatable and setreadonly and newcclosure) then
+        warn("[Lambda] getrawmetatable indisponível — kick hook e anti-kill desligados")
+        return
+    end
+    local mt=getrawmetatable(game)
+    local oldNC=mt.__namecall
+    local oldNI=mt.__newindex
+    setreadonly(mt,false)
+    mt.__namecall=newcclosure(function(self,...)
+        local method=getnamecallmethod()
+        if method=="Kick" and self==LocalPlayer then
+            local args={...}
+            local reason=tostring(args[1] or "unknown")
+            print("[Lambda] Kick intercepted: " .. reason)
+            safeRejoin(reason)
+            return nil
+        end
+        if C.AntiMurderer and not C.IntentionalReset then
+            local hum=HUM()
+            if hum and self==hum then
+                if method=="TakeDamage" then return 0 end
+                if method=="ChangeState" then
+                    local a={...}
+                    if a[1]==Enum.HumanoidStateType.Dead then return nil end
+                end
+            end
+        end
+        return oldNC(self,...)
+    end)
+    mt.__newindex=newcclosure(function(self,key,value)
+        if C.AntiMurderer and not C.IntentionalReset then
+            local hum=HUM()
+            if hum and self==hum and key=="Health" and value<=0 then
+                if murdererNearby() then return end
+            end
+        end
+        return oldNI(self,key,value)
+    end)
+    setreadonly(mt,true)
+    print("[Lambda] Hooks installed (kick rejoin + anti-kill)")
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not C.AntiMurderer or C.IntentionalReset then return end
+    local hum=HUM()
+    if not hum or hum.Health<=0 then return end
+    if murdererNearby() then
+        if hum.MaxHealth<1000 then pcall(function() hum.MaxHealth=1000 end) end
+        if hum.Health<hum.MaxHealth then pcall(function() hum.Health=hum.MaxHealth end) end
+    end
+end)
+
+-- ============ Bag ============
+local EVENT_CURR={Candy=true,SnowToken=true,Token=true,Shell=true,Egg=true,Present=true,Gift=true,Gem=true}
 local function threshold()
     if C.Threshold>0 then return C.Threshold end
     return EVENT_CURR[C.Currency] and 50 or 40
 end
-local PATTERNS = {"coin","cand","token","shell","egg","present","gift","gem","snow"}
+local PATTERNS={"coin","cand","token","shell","egg","present","gift","gem","snow"}
 local function statValue()
     local best
-    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    local ls=LocalPlayer:FindFirstChild("leaderstats")
     if ls then
         for _,ch in ipairs(ls:GetChildren()) do
             if ch:IsA("IntValue") or ch:IsA("NumberValue") then
                 local n=ch.Name:lower()
                 for _,p in ipairs(PATTERNS) do
-                    if n:find(p) then
-                        if not best or ch.Value>best then best=ch.Value end
-                        break
-                    end
+                    if n:find(p) then if not best or ch.Value>best then best=ch.Value end; break end
                 end
             end
         end
@@ -175,7 +316,7 @@ end
 local noclipConn
 local function startNoclip()
     if noclipConn then noclipConn:Disconnect() end
-    noclipConn = RunService.Stepped:Connect(function()
+    noclipConn=RunService.Stepped:Connect(function()
         if not C.Noclip then return end
         local ch=LocalPlayer.Character; if not ch then return end
         for _,p in ipairs(ch:GetDescendants()) do
@@ -188,23 +329,23 @@ local function stopNoclip() if noclipConn then noclipConn:Disconnect(); noclipCo
 local afkConn
 local function startAFK()
     if afkConn then afkConn:Disconnect() end
-    afkConn = LocalPlayer.Idled:Connect(function()
+    afkConn=LocalPlayer.Idled:Connect(function()
         pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new(0,0)) end)
     end)
 end
 
 local voidConn
-local origDH = Workspace.FallenPartsDestroyHeight
+local origDH=Workspace.FallenPartsDestroyHeight
 local function setupVoid()
     if not C.AntiVoid then Workspace.FallenPartsDestroyHeight=origDH; if voidConn then voidConn:Disconnect(); voidConn=nil end; return end
     Workspace.FallenPartsDestroyHeight=0/0
     if voidConn then voidConn:Disconnect() end
-    voidConn = LocalPlayer.CharacterAdded:Connect(function() task.wait(0.1); Workspace.FallenPartsDestroyHeight=0/0 end)
+    voidConn=LocalPlayer.CharacterAdded:Connect(function() task.wait(0.1); Workspace.FallenPartsDestroyHeight=0/0 end)
 end
 
 local function startFling()
-    local lastP, lastT = nil, tick()
-    local lastC = nil
+    local lastP,lastT=nil,tick()
+    local lastC=nil
     RunService.Heartbeat:Connect(function()
         if not C.AntiFling then return end
         local ch=LocalPlayer.Character
@@ -227,34 +368,10 @@ local function startFling()
     end)
 end
 
-local function startAntiMurderer()
-    if C.AntiMurdererThread then task.cancel(C.AntiMurdererThread) end
-    C.AntiMurdererThread = task.spawn(function()
-        while true do
-            task.wait(0.5)
-            if C.AntiMurderer then
-                local h=HRP()
-                if h then
-                    local m=findMurderer()
-                    if m and m.Character then
-                        local mh=m.Character:FindFirstChild("HumanoidRootPart")
-                        if mh and (h.Position-mh.Position).Magnitude<25 then
-                            local was=h.Anchored
-                            if was then h.Anchored=false end
-                            h.CFrame=CFrame.new(h.Position-Vector3.new(0,30,0))*h.CFrame.Rotation
-                            if was then h.Anchored=true end
-                        end
-                    end
-                end
-            end
-        end
-    end)
-end
-
 -- ============ Coin cache ============
-local coinCache = { parts={}, ts=0 }
+local coinCache={parts={},ts=0}
 local function getContainers()
-    local list = {}
+    local list={}
     for _,o in ipairs(Workspace:GetChildren()) do
         for _,n in ipairs({"CoinContainer","CandyContainer","TokenContainer","Collectables"}) do
             local c=o:FindFirstChild(n); if c then table.insert(list,c) end
@@ -269,7 +386,7 @@ local function getContainers()
     return list
 end
 local function getCoins()
-    if tick()-coinCache.ts < 0.4 then
+    if tick()-coinCache.ts<0.4 then
         local alive={}
         for _,p in ipairs(coinCache.parts) do if p.Parent then table.insert(alive,p) end end
         coinCache.parts=alive
@@ -278,9 +395,7 @@ local function getCoins()
     local parts={}
     for _,c in ipairs(getContainers()) do
         for _,d in ipairs(c:GetDescendants()) do
-            if d:IsA("BasePart") and d:FindFirstChildWhichIsA("TouchTransmitter") then
-                table.insert(parts,d)
-            end
+            if d:IsA("BasePart") and d:FindFirstChildWhichIsA("TouchTransmitter") then table.insert(parts,d) end
         end
     end
     coinCache.parts=parts; coinCache.ts=tick()
@@ -288,7 +403,7 @@ local function getCoins()
 end
 local function nearestCoin()
     local h=HRP(); if not h then return nil end
-    local best, bd = nil, math.huge
+    local best,bd=nil,math.huge
     for _,p in ipairs(getCoins()) do
         local d=(h.Position-p.Position).Magnitude
         if d<bd then bd=d; best=p end
@@ -314,40 +429,32 @@ local function touch(coin)
 end
 
 -- ============ Movement ============
-local LAY = CFrame.Angles(math.rad(90),0,0)
-local function travel(targetPos, rot90, spd, coinRef)
+local LAY=CFrame.Angles(math.rad(90),0,0)
+local function travel(targetPos,rot90,spd,coinRef)
     local h=HRP(); if not h then return false end
     if not h.Anchored then h.Anchored=true end
     local u=HUM()
     if u and not u.PlatformStand then u.PlatformStand=true; u.AutoRotate=false end
-    spd = math.clamp(spd or C.Speed, 10, 70)
-    local rot = rot90 and LAY or h.CFrame.Rotation
-    local lastT = tick()
-    local startT = tick()
-    local lastDist = math.huge
-    local lastProgress = tick()
-
+    spd=math.clamp(spd or C.Speed,10,70)
+    local rot=rot90 and LAY or h.CFrame.Rotation
+    local lastT=tick(); local startT=tick()
+    local lastDist=math.huge; local lastProgress=tick()
     while C.Farming do
         if tick()-startT>15 then return false end
-        if not inRound() then return false end
+        if isDeadOrOutOfRound() then return false end
         local cur=HRP()
         if not cur or not cur.Anchored then return false end
         if coinRef and not coinRef.Parent then return false end
-        local cu=HUM()
-        if not cu or cu.Health<=0 then return false end
         if cur.Position.Y<-150 or cur.Position.Y>10000 then return false end
-
-        local delta = targetPos - cur.Position
-        local dist = delta.Magnitude
+        local delta=targetPos-cur.Position
+        local dist=delta.Magnitude
         if dist<2.5 then cur.CFrame=CFrame.new(targetPos)*rot; return true end
-
-        if dist < lastDist-1 then lastProgress=tick(); lastDist=dist
+        if dist<lastDist-1 then lastProgress=tick(); lastDist=dist
         elseif tick()-lastProgress>3 then return false end
-
         local now=tick()
         local dt=math.min(now-lastT,0.05)
         lastT=now
-        local step=math.min(spd*dt, dist)
+        local step=math.min(spd*dt,dist)
         cur.CFrame=CFrame.new(cur.Position+delta.Unit*step)*rot
         task.wait()
     end
@@ -360,14 +467,14 @@ local function beginMove()
     if h then h.Anchored=true; h.AssemblyLinearVelocity=Vector3.zero; h.AssemblyAngularVelocity=Vector3.zero end
 end
 
--- ============ Role ============
+-- ============ Role / actions ============
 local function role()
     local d=PD()
     if d and d[LocalPlayer.Name] then
         local r=d[LocalPlayer.Name].Role
         if r and r~="None" then return r end
     end
-    for _,cont in ipairs({LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")}) do
+    for _,cont in ipairs({LocalPlayer.Character,LocalPlayer:FindFirstChild("Backpack")}) do
         if cont then
             for _,it in ipairs(cont:GetChildren()) do
                 if it:IsA("Tool") then
@@ -380,7 +487,6 @@ local function role()
     end
     return "Innocent"
 end
-
 local function equip(n)
     local ch=LocalPlayer.Character; if not ch then return nil end
     local t=ch:FindFirstChild(n)
@@ -410,7 +516,7 @@ local function shoot()
     local mh=m.Character:FindFirstChild("HumanoidRootPart")
     local h=HRP()
     if not mh or not h then return end
-    h.CFrame=CFrame.new(h.Position, mh.Position)
+    h.CFrame=CFrame.new(h.Position,mh.Position)
     task.wait(0.1)
     pcall(function() g:Activate() end)
     task.wait(0.05)
@@ -433,7 +539,6 @@ local function fling()
     bg.MaxTorque=Vector3.new(math.huge,math.huge,math.huge); bg.P=100000; bg.CFrame=CFrame.new(0,math.huge,0); bg.Parent=mh
     Debris:AddItem(bv,0.6); Debris:AddItem(bg,0.6)
 end
-
 local function fullBag()
     local r=role()
     local did=false
@@ -452,14 +557,14 @@ end
 
 local function statsTick()
     task.spawn(function()
-        LocalPlayer:WaitForChild("leaderstats", 10)
+        LocalPlayer:WaitForChild("leaderstats",10)
         task.wait(1)
-        C.Stats.Last = statValue() or 0
+        C.Stats.Last=statValue() or 0
         while true do
             task.wait(0.5)
             local v=statValue()
-            if v and C.Stats.Last and v>C.Stats.Last then C.Stats.Total = C.Stats.Total + (v-C.Stats.Last) end
-            if v then C.Stats.Last = v end
+            if v and C.Stats.Last and v>C.Stats.Last then C.Stats.Total=C.Stats.Total+(v-C.Stats.Last) end
+            if v then C.Stats.Last=v end
         end
     end)
 end
@@ -476,26 +581,28 @@ task.spawn(function()
         local ch=LocalPlayer.Character
         if ch~=lastC then lastC=ch; C.MissCount=0; C.WasInRound=false end
         local h=ch and ch:FindFirstChild("HumanoidRootPart")
-        if C.Farming and h then
+        local u=ch and ch:FindFirstChildOfClass("Humanoid")
+        if C.Farming and h and u then
             if h.Position.Y<-150 then
                 C.FarmStatus="fell"
                 hardReset(); C.Cooldown=tick()+3; C.MissCount=0; C.WasInRound=false
                 continue
             end
-            local ir=inRound()
-            if ir then C.WasInRound=true; C.MissCount=0
+            local outside=isDeadOrOutOfRound()
+            if not outside then C.WasInRound=true; C.MissCount=0
             elseif C.WasInRound then
                 C.MissCount=C.MissCount+1
                 if C.MissCount>=3 then
                     C.FarmStatus="round end"
-                    hardReset(); C.Cooldown=tick()+3; C.MissCount=0; C.WasInRound=false
+                    if u.Health>0 then hardReset() end
+                    C.Cooldown=tick()+3; C.MissCount=0; C.WasInRound=false
                 end
             end
         else C.MissCount=0; C.WasInRound=false end
     end
 end)
 
--- ============ Farm loop ============
+-- ============ Farm ============
 local function farm()
     if C.Farming then return end
     C.Farming=true; C.FarmStatus="starting"
@@ -504,20 +611,20 @@ local function farm()
             if tick()<C.Cooldown then C.FarmStatus="cooldown"; cleanup(); task.wait(0.2); continue end
             local u=HUM(); local h=HRP()
             if not u or u.Health<=0 or not h then C.FarmStatus="no char"; task.wait(0.3); continue end
-            if not inRound() then C.FarmStatus="lobby"; cleanup(); task.wait(0.3); continue end
-
+            if u:GetState()==Enum.HumanoidStateType.Dead then C.FarmStatus="dead state"; cleanup(); task.wait(0.3); continue end
+            if isDeadOrOutOfRound() then C.FarmStatus="dead/lobby"; cleanup(); task.wait(0.3); continue end
             local coin=nearestCoin()
             if coin then
-                local depth = C.FarmMode=="Stealth" and C.Depth or 0
-                local rot90 = C.FarmMode=="Lay"
+                local depth=C.FarmMode=="Stealth" and C.Depth or 0
+                local rot90=C.FarmMode=="Lay"
                 if depth>0 then
-                    local below = coin.Position - Vector3.new(0, depth, 0)
+                    local below=coin.Position-Vector3.new(0,depth,0)
                     if not h.Anchored then beginMove(); task.wait(0.03) end
                     C.FarmStatus="travel-below"
-                    if travel(below, rot90, C.Speed, coin) then
+                    if travel(below,rot90,C.Speed,coin) then
                         C.FarmStatus="rise"
-                        local above = coin.Position + Vector3.new(0, C.CoinRise, 0)
-                        travel(above, rot90, C.Speed*1.6, coin)
+                        local above=coin.Position+Vector3.new(0,C.CoinRise,0)
+                        travel(above,rot90,C.Speed*1.6,coin)
                         if coin.Parent then
                             C.FarmStatus="collect"
                             touch(coin)
@@ -526,12 +633,12 @@ local function farm()
                             if coin.Parent then C.CollectFails=C.CollectFails+1 else C.CollectFails=0 end
                         end
                         C.FarmStatus="descend"
-                        travel(coin.Position - Vector3.new(0, depth, 0), rot90, C.Speed*1.6, nil)
+                        travel(coin.Position-Vector3.new(0,depth,0),rot90,C.Speed*1.6,nil)
                     end
                 else
                     if not h.Anchored then beginMove(); task.wait(0.03) end
                     C.FarmStatus="travel"
-                    if travel(coin.Position, rot90, C.Speed, coin) and coin.Parent then
+                    if travel(coin.Position,rot90,C.Speed,coin) and coin.Parent then
                         C.FarmStatus="collect"
                         touch(coin)
                         local t=tick()
@@ -545,7 +652,6 @@ local function farm()
                 cleanup()
                 task.wait(0.3)
             end
-
             local st=statValue()
             if st and st>=threshold() and tick()-C.LastFull>3 then
                 C.LastFull=tick(); C.FarmStatus="full bag"; fullBag()
@@ -560,94 +666,7 @@ local function stopFarm()
     cleanup()
 end
 
--- ============ Source + URL reexec ============
-local function captureSrc()
-    if getgenv().LAMBDA_SOURCE then return end
-    local e=env()
-    local rd=type(readfile)=="function" and readfile or e.readfile
-    local wr=type(writefile)=="function" and writefile or e.writefile
-    if rd then
-        local ok,d=pcall(rd,SRC)
-        if ok and d and #d>1000 then getgenv().LAMBDA_SOURCE=d; return end
-    end
-    local ok,info=pcall(function() return debug.getinfo(1,"S") end)
-    if ok and info and info.source then
-        local s=info.source
-        if s:sub(1,1)=="@" and rd then
-            local o,c=pcall(rd,s:sub(2)); if o and c then getgenv().LAMBDA_SOURCE=c; if wr then pcall(wr,SRC,c) end; return end
-        elseif s:sub(1,1)=="=" then
-            local m=s:match('^=%[string "(.*)"%]$')
-            if m and #m>100 then
-                m=m:gsub('\\n','\n'):gsub('\\t','\t'):gsub('\\"','"'):gsub("\\'","'"):gsub('\\\\','\\')
-                getgenv().LAMBDA_SOURCE=m; if wr then pcall(wr,SRC,m) end
-                return
-            end
-        end
-    end
-end
-
--- Prioridade: URL remota (payload pequeno). Fallback: readfile (payload médio).
-local function getPayload()
-    if C.ReexecURL and C.ReexecURL~="" then
-        return 'pcall(function() loadstring(game:HttpGet("'..C.ReexecURL..'"))() end)', "url"
-    end
-    captureSrc()
-    local src=getgenv().LAMBDA_SOURCE
-    if not src then return nil, "none" end
-    local e=env()
-    local wr=type(writefile)=="function" and writefile or e.writefile
-    if wr then pcall(wr,SRC,src) end
-    return "pcall(function() local s=readfile('"..SRC.."'); if s and #s>100 then loadstring(s)() end end)", "file"
-end
-
--- Cadeia de fallback completa: syn → fluxus → krnl → global → getgenv → queueonteleport
-local function queueReexec()
-    local p,k=getPayload()
-    if not p then warn("[Lambda] Reexec: sem URL e sem source"); return false end
-    local wrappers = {
-        {name="syn", fn=function() if syn and type(syn.queue_on_teleport)=="function" then return syn.queue_on_teleport end end},
-        {name="fluxus", fn=function() if fluxus and type(fluxus.queue_on_teleport)=="function" then return fluxus.queue_on_teleport end end},
-        {name="krnl", fn=function() if krnl and type(krnl.queue_on_teleport)=="function" then return krnl.queue_on_teleport end end},
-        {name="queue_on_teleport", fn=function() if type(queue_on_teleport)=="function" then return queue_on_teleport end end},
-        {name="getgenv().queue_on_teleport", fn=function() local g=getgenv(); if g and type(g.queue_on_teleport)=="function" then return g.queue_on_teleport end end},
-        {name="queueonteleport", fn=function() if type(queueonteleport)=="function" then return queueonteleport end end},
-    }
-    for _,w in ipairs(wrappers) do
-        local ok, fn = pcall(w.fn)
-        if ok and fn then
-            local ok2 = pcall(fn, p)
-            if ok2 then print("[Lambda] Reexec: "..w.name.." ("..k..")"); return true end
-        end
-    end
-    warn("[Lambda] Reexec: nenhum método disponível. Ative Auto-Execute para "..SRC)
-    return false
-end
-
--- ============ Kick hook com guarda ============
-pcall(function()
-    if not (getrawmetatable and setreadonly and newcclosure) then return end
-    local mt=getrawmetatable(game)
-    local old=mt.__namecall
-    setreadonly(mt,false)
-    mt.__namecall=newcclosure(function(self,...)
-        local method=getnamecallmethod()
-        if method=="Kick" and self==LocalPlayer and not C.IsTeleporting then
-            print("[Lambda] Kick interceptado")
-            C.IsTeleporting=true
-            queueReexec()
-            task.spawn(function()
-                task.wait(0.15)
-                pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-            end)
-            return nil
-        end
-        return old(self,...)
-    end)
-    setreadonly(mt,true)
-    print("[Lambda] Kick hook on")
-end)
-
--- ============ HTTP ============
+-- ============ HTTP / hop ============
 local function httpGet(u)
     local m={
         function() return game:HttpGet(u) end,
@@ -659,9 +678,8 @@ local function httpGet(u)
     return nil
 end
 
--- ============ Server hop (sem crash: pcall + wait entre tentativas) ============
 local function pool()
-    local raw=httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId))
+    local raw=httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",game.PlaceId))
     if not raw then return {} end
     local ok,res=pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok or not res or not res.data then return {} end
@@ -675,46 +693,36 @@ end
 
 local function hop()
     if C.IsHopping then return false end
-    C.IsHopping=true
-    C.IsTeleporting=true
-
-    -- 1. Enfileira ANTES de qualquer coisa (payload pequeno)
-    C.HopStatus="queue"
-    local queued = queueReexec()
-
-    -- 2. Busca servidores
+    C.IsHopping=true; C.IsTeleporting=true
     C.HopStatus="fetch"
     local list=pool()
-    if #list==0 then
-        C.HopStatus="no servers"
-        C.IsHopping=false; C.IsTeleporting=false
-        return false
-    end
-
-    -- 3. Tenta cada servidor com pcall + delay de 0.5s (evita crash loop)
+    if #list==0 then C.HopStatus="no servers"; C.IsHopping=false; C.IsTeleporting=false; return false end
     for i,s in ipairs(list) do
-        C.HopStatus=string.format("try %d/%d", i, #list)
+        C.HopStatus=string.format("try %d/%d",i,#list)
         local ok,res=pcall(function()
             local o=Instance.new("TeleportOptions")
             o.ServerInstanceId=s.id
-            return TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer, o)
+            return TeleportService:TeleportToPlaceInstance(game.PlaceId,s.id,LocalPlayer,o)
         end)
         if ok and not (typeof(res)=="EnumItem" and res==Enum.TeleportState.Failed) then
-            C.HopStatus="OK"..(queued and "" or " (sem reexec)")
-            task.wait(4) -- aguarda o teleporte iniciar antes de liberar guarda
+            C.HopStatus="OK"
+            task.wait(4)
             C.IsHopping=false; C.IsTeleporting=false
             return true
         end
-        task.wait(0.5) -- delay entre tentativas (crítico para não crashar)
+        task.wait(0.5)
     end
-
-    -- 4. Fallback: Teleport(PlaceId)
     C.HopStatus="fallback"
-    local ok=pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+    local ok=pcall(function() TeleportService:Teleport(game.PlaceId,LocalPlayer) end)
     task.wait(3)
     C.IsHopping=false; C.IsTeleporting=false
-    C.HopStatus = ok and ("fallback OK"..(queued and "" or " (sem reexec)")) or "FAILED"
+    C.HopStatus=ok and "fallback OK" or "FAILED"
     return ok
+end
+
+local function hopNow()
+    if C.IsHopping or RejoinState.active then return end
+    task.spawn(hop)
 end
 
 local function hopMonitor()
@@ -722,11 +730,10 @@ local function hopMonitor()
     C.HopThread=task.spawn(function()
         while C.HopAt>0 do
             task.wait(5)
-            if not C.IsHopping and #Players:GetPlayers()>C.HopAt then hop(); break end
+            if not C.IsHopping and not RejoinState.active and #Players:GetPlayers()>C.HopAt then hop(); break end
         end
     end)
 end
-
 local function friendMonitor()
     if C.FriendThread then return end
     C.FriendThread=task.spawn(function()
@@ -764,7 +771,7 @@ local function pads()
         local g=p and p:FindFirstChild("VoteInfoGui")
         local c=g and g:FindFirstChild("Container")
         local l2=c and c:FindFirstChild("MapName")
-        if t and l2 and g.Enabled then table.insert(o,{trigger=t, map=l2.Text}) end
+        if t and l2 and g.Enabled then table.insert(o,{trigger=t,map=l2.Text}) end
     end
     return o
 end
@@ -794,7 +801,7 @@ local function vote(p)
     while tick()-st<2 do
         task.wait(0.05)
         local ch=HRP(); if not ch then return false end
-        if inside(p.trigger, ch.Position) then landed=true; break end
+        if inside(p.trigger,ch.Position) then landed=true; break end
         if tick()-st>1 then ch.CFrame=CFrame.new(pp+Vector3.new(0,1,0)) end
     end
     if not landed then return false end
@@ -806,7 +813,7 @@ local function vote(p)
         pcall(function() firetouchinterest(h,p.trigger,0); task.wait(0.05); firetouchinterest(h,p.trigger,1) end)
     end
     task.wait(0.2)
-    if u.Health>0 then u:ChangeState(Enum.HumanoidStateType.Dead); u.Health=0 end
+    if u.Health>0 then C.IntentionalReset=true; u:ChangeState(Enum.HumanoidStateType.Dead); u.Health=0; task.delay(1.5,function() C.IntentionalReset=false end) end
     return true
 end
 local function startVote()
@@ -828,7 +835,7 @@ end
 local function stopVote() C.VoteMode=0; if C.VoteThread then task.cancel(C.VoteThread); C.VoteThread=nil end end
 
 -- ============ ESP ============
-local ROLE_COLORS = {
+local ROLE_COLORS={
     Murderer=Color3.fromRGB(255,40,40),
     Sheriff=Color3.fromRGB(40,140,255),
     Hero=Color3.fromRGB(255,200,50),
@@ -837,13 +844,9 @@ local ROLE_COLORS = {
 }
 local COIN_COL=Color3.fromRGB(255,215,0)
 local GUN_COL=Color3.fromRGB(255,100,255)
-local hasDrawing = (function()
-    local ok,d=pcall(function() return Drawing.new("Square") end)
-    if ok and d then pcall(function() d:Remove() end); return true end
-    return false
-end)
+local hasDrawing=(function() local ok,d=pcall(function() return Drawing.new("Square") end); if ok and d then pcall(function() d:Remove() end); return true end; return false end)()
 
-local ESP = { draws={}, smooth={}, highlights={}, coinSels={}, gunSels={} }
+local ESP={draws={},smooth={},highlights={},coinSels={},gunSels={}}
 local function roleFor(p)
     local d=PD()
     if d and d[p.Name] and d[p.Name].Role and d[p.Name].Role~="None" then return d[p.Name].Role end
@@ -870,19 +873,15 @@ local function hideAll(t) for _,d in pairs(t) do pcall(function() d.Visible=fals
 
 local function updateESP()
     if not hasDrawing then return end
-    if not (C.ESPOn or C.TracersOn) then
-        for _,t in pairs(ESP.draws) do hideAll(t) end
-        return
-    end
+    if not (C.ESPOn or C.TracersOn) then for _,t in pairs(ESP.draws) do hideAll(t) end; return end
     local cam=workspace.CurrentCamera; if not cam then return end
     local lh=HRP(); local lu=HUM()
     local origin
     if lh and lu and lu.Health>0 then
         local sp,on=cam:WorldToViewportPoint(lh.Position)
-        if on then origin=Vector2.new(sp.X, sp.Y) end
+        if on then origin=Vector2.new(sp.X,sp.Y) end
     end
-    if not origin then local vs=cam.ViewportSize; origin=Vector2.new(vs.X/2, vs.Y) end
-
+    if not origin then local vs=cam.ViewportSize; origin=Vector2.new(vs.X/2,vs.Y) end
     for _,p in ipairs(Players:GetPlayers()) do
         if p==LocalPlayer then continue end
         local t=ESP.draws[p] or getDraw(p)
@@ -894,29 +893,22 @@ local function updateESP()
         local r=roleFor(p)
         if not roleShown(r) then hideAll(t) continue end
         local col=ROLE_COLORS[r] or ROLE_COLORS.Unknown
-
-        local top,on1 = cam:WorldToViewportPoint(hp.Position + Vector3.new(0, 2.6, 0))
-        local bot,on2 = cam:WorldToViewportPoint(hp.Position - Vector3.new(0, 2.8, 0))
+        local top,on1=cam:WorldToViewportPoint(hp.Position+Vector3.new(0,2.6,0))
+        local bot,on2=cam:WorldToViewportPoint(hp.Position-Vector3.new(0,2.8,0))
         if not (on1 and on2) then hideAll(t) continue end
         if math.abs(top.Y-bot.Y)<2 then hideAll(t) continue end
-
-        local h = math.abs(top.Y-bot.Y)
-        local w = h/1.8
-        local targetPos = Vector2.new(top.X - w/2, top.Y)
-        local targetSize = Vector2.new(w, h)
-        local targetTracerTo = Vector2.new(top.X, top.Y)
-        local s = ESP.smooth[p]
-        if not s then
-            s={pos=targetPos, size=targetSize, tracerTo=targetTracerTo}
-            ESP.smooth[p]=s
-        end
-        s.pos = s.pos:Lerp(targetPos, 0.4)
-        s.size = s.size:Lerp(targetSize, 0.4)
-        s.tracerTo = s.tracerTo:Lerp(targetTracerTo, 0.5)
-
+        local h=math.abs(top.Y-bot.Y); local w=h/1.8
+        local targetPos=Vector2.new(top.X-w/2,top.Y)
+        local targetSize=Vector2.new(w,h)
+        local targetTracerTo=Vector2.new(top.X,top.Y)
+        local s=ESP.smooth[p]
+        if not s then s={pos=targetPos,size=targetSize,tracerTo=targetTracerTo}; ESP.smooth[p]=s end
+        s.pos=s.pos:Lerp(targetPos,0.4)
+        s.size=s.size:Lerp(targetSize,0.4)
+        s.tracerTo=s.tracerTo:Lerp(targetTracerTo,0.5)
         if C.ESPOn then
             if t.box then t.box.Position=s.pos; t.box.Size=s.size; t.box.Color=col; t.box.Visible=true end
-            if t.name then t.name.Text=p.Name.." ["..r.."]"; t.name.Position=Vector2.new(top.X, s.pos.Y-18); t.name.Color=col; t.name.Visible=true end
+            if t.name then t.name.Text=p.Name.." ["..r.."]"; t.name.Position=Vector2.new(top.X,s.pos.Y-18); t.name.Color=col; t.name.Visible=true end
         else
             if t.box then t.box.Visible=false end
             if t.name then t.name.Visible=false end
@@ -935,10 +927,9 @@ end)
 local hlAccum=0
 RunService.Heartbeat:Connect(function(dt)
     if not (C.ChamsOn or C.OutlinesOn or C.CoinESP or C.GunESP) then return end
-    hlAccum += dt
+    hlAccum=hlAccum+dt
     if hlAccum<0.2 then return end
     hlAccum=0
-
     if C.ChamsOn or C.OutlinesOn then
         for _,p in ipairs(Players:GetPlayers()) do
             if p==LocalPlayer then continue end
@@ -961,7 +952,6 @@ RunService.Heartbeat:Connect(function(dt)
         for _,hl in pairs(ESP.highlights) do pcall(function() hl:Destroy() end) end
         ESP.highlights={}
     end
-
     if C.CoinESP then
         local seen={}
         for _,coin in ipairs(getCoins()) do
@@ -978,13 +968,12 @@ RunService.Heartbeat:Connect(function(dt)
         for _,sb in pairs(ESP.coinSels) do pcall(function() sb:Destroy() end) end
         ESP.coinSels={}
     end
-
     if C.GunESP then
         local seen={}
         for _,o in ipairs(Workspace:GetChildren()) do
-            local isGun = (o:IsA("Tool") or o:IsA("Model")) and (o.Name=="Gun" or o.Name=="Revolver")
+            local isGun=(o:IsA("Tool") or o:IsA("Model")) and (o.Name=="Gun" or o.Name=="Revolver")
             if isGun and not Players:GetPlayerFromCharacter(o.Parent) then
-                local handle = o:FindFirstChild("Handle") or (o:IsA("Model") and o.PrimaryPart) or o:FindFirstChildWhichIsA("BasePart")
+                local handle=o:FindFirstChild("Handle") or (o:IsA("Model") and o.PrimaryPart) or o:FindFirstChildWhichIsA("BasePart")
                 if handle then
                     seen[handle]=true
                     local sb=ESP.gunSels[handle]
@@ -1019,8 +1008,34 @@ end
 local function findIdx(t,v) for i,x in ipairs(t) do if x==v then return i end end; return 1 end
 
 local MAIN_GUI
+local REBUILD_TOKEN=0
+local function scheduleRebuild()
+    REBUILD_TOKEN=REBUILD_TOKEN+1
+    local myToken=REBUILD_TOKEN
+    task.delay(0.3,function()
+        if REBUILD_TOKEN==myToken then buildGui() end
+    end)
+end
 
-local function buildGui()
+local PRESETS={
+    Color3.fromRGB(255,0,0),Color3.fromRGB(255,100,0),Color3.fromRGB(255,200,0),Color3.fromRGB(180,255,0),
+    Color3.fromRGB(0,255,0),Color3.fromRGB(0,255,180),Color3.fromRGB(0,255,255),Color3.fromRGB(0,180,255),
+    Color3.fromRGB(0,100,255),Color3.fromRGB(0,0,255),Color3.fromRGB(100,0,255),Color3.fromRGB(180,0,255),
+    Color3.fromRGB(255,0,255),Color3.fromRGB(255,0,180),Color3.fromRGB(255,0,100),
+    Color3.fromRGB(255,255,255),Color3.fromRGB(200,200,200),Color3.fromRGB(128,128,128),
+    Color3.fromRGB(64,64,64),Color3.fromRGB(30,30,30),Color3.fromRGB(0,0,0),
+    Color3.fromRGB(150,75,0),Color3.fromRGB(255,180,150),Color3.fromRGB(80,40,20),
+}
+local THEMES={
+    {name="Gold", p=Color3.fromRGB(255,200,0), s=Color3.fromRGB(30,30,30)},
+    {name="Ocean", p=Color3.fromRGB(0,180,255), s=Color3.fromRGB(20,30,45)},
+    {name="Forest", p=Color3.fromRGB(80,200,80), s=Color3.fromRGB(20,30,20)},
+    {name="Rose", p=Color3.fromRGB(255,100,150), s=Color3.fromRGB(40,20,30)},
+    {name="Cyber", p=Color3.fromRGB(255,0,180), s=Color3.fromRGB(15,15,40)},
+    {name="Mono", p=Color3.fromRGB(220,220,220), s=Color3.fromRGB(25,25,25)},
+}
+
+function buildGui()
     if MAIN_GUI then pcall(function() MAIN_GUI:Destroy() end) end
     local parent=guiParent(); if not parent then return end
     local gui=Instance.new("ScreenGui")
@@ -1037,7 +1052,7 @@ local function buildGui()
 
     local title=Instance.new("TextLabel")
     title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0)
-    title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.22"
+    title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.24"
     title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13
     title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
 
@@ -1075,7 +1090,7 @@ local function buildGui()
     content.BackgroundTransparency=1; content.Parent=main
 
     local tabs={}
-    local function newTab(name, wPct)
+    local function newTab(name,wPct)
         local b=Instance.new("TextButton")
         b.Size=UDim2.new(wPct,0,1,0); b.BackgroundColor3=SECONDARY
         b.Text=name; b.TextColor3=TEXT_DIM; b.Font=Enum.Font.GothamBold; b.TextSize=11; b.Parent=tabBar
@@ -1084,7 +1099,7 @@ local function buildGui()
         f.CanvasSize=UDim2.new(0,0,0,0); f.Visible=false; f.Parent=content
         local l=Instance.new("UIListLayout"); l.Padding=UDim.new(0,4); l.SortOrder=Enum.SortOrder.LayoutOrder; l.Parent=f
         local p=Instance.new("UIPadding"); p.PaddingTop=UDim.new(0,8); p.PaddingLeft=UDim.new(0,8); p.PaddingRight=UDim.new(0,8); p.Parent=f
-        tabs[name]={btn=b, frame=f, list=l}
+        tabs[name]={btn=b,frame=f,list=l}
         l:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
             f.CanvasSize=UDim2.new(0,0,0,l.AbsoluteContentSize.Y+16)
         end)
@@ -1107,7 +1122,8 @@ local function buildGui()
         local l=Instance.new("TextLabel")
         l.Size=UDim2.new(1,0,0,16); l.BackgroundTransparency=1
         l.Text=txt; l.TextColor3=TEXT_DIM; l.Font=Enum.Font.Gotham; l.TextSize=10
-        l.TextXAlignment=Enum.TextXAlignment.Left; l.LayoutOrder=ord; l.Parent=par; return l
+        l.TextXAlignment=Enum.TextXAlignment.Left; l.LayoutOrder=ord; l.Parent=par
+        return l
     end
     local function tog(par,txt,init,ord,cb)
         local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
@@ -1133,15 +1149,6 @@ local function buildGui()
         b.Font=Enum.Font.Gotham; b.TextSize=11; b.Parent=row
         b.FocusLost:Connect(function() pcall(function() cb(b.Text) end); save() end)
     end
-    local function wide(par,label,val,ord,cb)
-        local col=Instance.new("Frame"); col.Size=UDim2.new(1,0,0,44); col.BackgroundTransparency=1; col.LayoutOrder=ord; col.Parent=par
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,0,0,14); l.BackgroundTransparency=1
-        l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=col
-        local b=Instance.new("TextBox"); b.Size=UDim2.new(1,0,0,24); b.Position=UDim2.new(0,0,0,16)
-        b.BackgroundColor3=Color3.fromRGB(45,45,45); b.TextColor3=Color3.fromRGB(255,255,255); b.Text=tostring(val)
-        b.Font=Enum.Font.Gotham; b.TextSize=10; b.Parent=col
-        b.FocusLost:Connect(function() pcall(function() cb(b.Text) end); save() end)
-    end
     local function cyc(par,label,opts,init,ord,cb)
         local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
         local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-130,1,0); l.BackgroundTransparency=1
@@ -1151,11 +1158,20 @@ local function buildGui()
         local i=findIdx(opts,init); b.Text=opts[i]
         b.MouseButton1Click:Connect(function() i=i%#opts+1; b.Text=opts[i]; pcall(function() cb(opts[i]) end); save() end)
     end
+    local function btn(par,label,bgColor,textColor,ord,cb)
+        local b=Instance.new("TextButton")
+        b.Size=UDim2.new(1,0,0,28); b.BackgroundColor3=bgColor; b.Text=label
+        b.TextColor3=textColor; b.Font=Enum.Font.GothamBold; b.TextSize=11
+        b.LayoutOrder=ord; b.Parent=par
+        b.MouseButton1Click:Connect(cb)
+        return b
+    end
 
     local o=0
     local function no() o=o+1; return o end
 
     tog(mainTab,"AUTO FARM",C.Farming,no(),function(s) if s then farm() else stopFarm() end end)
+    tog(mainTab,"Auto-launch on exec",C.AutoLaunch,no(),function(s) C.AutoLaunch=s end)
     lbl(mainTab,"— Currency —",no())
     cyc(mainTab,"Target",{"Coin","Candy","SnowToken","Token","Shell"},C.Currency,no(),function(v) C.Currency=v end)
     lbl(mainTab,"— Movement —",no())
@@ -1164,7 +1180,7 @@ local function buildGui()
     inp(mainTab,"Stealth depth",C.Depth,no(),function(v) local n=tonumber(v); if n then C.Depth=math.clamp(n,5,50) end end)
     inp(mainTab,"Coin rise height",C.CoinRise,no(),function(v) local n=tonumber(v); if n then C.CoinRise=math.clamp(n,1,20) end end)
     lbl(mainTab,"— Bag —",no())
-    inp(mainTab,"Threshold (0=auto, 50=default)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
+    inp(mainTab,"Threshold (50=default)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
     local stats=Instance.new("TextLabel")
     stats.Size=UDim2.new(1,0,0,72); stats.BackgroundColor3=Color3.fromRGB(30,28,0); stats.BorderSizePixel=0
     stats.TextColor3=PRIMARY; stats.Font=Enum.Font.Code; stats.TextSize=10
@@ -1175,7 +1191,7 @@ local function buildGui()
             task.wait(0.5)
             local b=statValue()
             stats.Text=string.format("Collected: %d\nPer hour: %d\nBag: %s/%d\nFails: %d\nStatus: %s",
-                C.Stats.Total, rate(), b and tostring(b) or "?", threshold(), C.CollectFails, C.FarmStatus or "idle")
+                C.Stats.Total,rate(),b and tostring(b) or "?",threshold(),C.CollectFails,C.FarmStatus or "idle")
         end
     end)
 
@@ -1196,7 +1212,7 @@ local function buildGui()
     tog(protectTab,"Anti-AFK",C.AntiAFK,no(),function(s) C.AntiAFK=s; if s then startAFK() end end)
     tog(protectTab,"Anti-Void",C.AntiVoid,no(),function(s) C.AntiVoid=s; setupVoid() end)
     tog(protectTab,"Anti-Fling",C.AntiFling,no(),function(s) C.AntiFling=s end)
-    tog(protectTab,"Anti-Murderer (drops down)",C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
+    tog(protectTab,"Anti-Murderer (passive)",C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
     tog(protectTab,"Noclip",C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
     tog(protectTab,"Disable 3D",C.Disable3D,no(),function(s) C.Disable3D=s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
 
@@ -1216,15 +1232,22 @@ local function buildGui()
     tog(espTab,"Dropped Gun ESP",C.GunESP,no(),function(s) C.GunESP=s end)
 
     o=0
-    wide(serverTab,"Reexec URL (raw GitHub, obrigatório p/ hop)",C.ReexecURL,no(),function(v) C.ReexecURL=v end)
+    tog(serverTab,"Auto-rejoin on kick",C.AutoRejoin,no(),function(s) C.AutoRejoin=s end)
     inp(serverTab,"Hop if players >",C.HopAt,no(),function(v) local n=tonumber(v); if n then C.HopAt=n end end)
     tog(serverTab,"Hop when friend joins",C.HopFriend,no(),function(s) C.HopFriend=s; if s then friendMonitor() end end)
+    btn(serverTab,"HOP NOW (change server)",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
+    btn(serverTab,"REJOIN NOW (recover manually)",Color3.fromRGB(80,80,80),Color3.fromRGB(255,255,255),no(),function() safeRejoin("manual") end)
     local hopLbl=Instance.new("TextLabel")
-    hopLbl.Size=UDim2.new(1,0,0,24); hopLbl.BackgroundColor3=Color3.fromRGB(28,28,28); hopLbl.BorderSizePixel=0
+    hopLbl.Size=UDim2.new(1,0,0,36); hopLbl.BackgroundColor3=Color3.fromRGB(28,28,28); hopLbl.BorderSizePixel=0
     hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=10
-    hopLbl.Text="Hop: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab
+    hopLbl.Text="Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab
     task.spawn(function()
-        while hopLbl.Parent do task.wait(0.5); hopLbl.Text="Hop: "..(C.HopStatus~="" and C.HopStatus or "idle") end
+        while hopLbl.Parent do
+            task.wait(0.5)
+            local s="Status: "..(C.HopStatus~="" and C.HopStatus or "idle")
+            if C.LastKickReason~="" then s=s.."\nLast kick: "..C.LastKickReason end
+            hopLbl.Text=s
+        end
     end)
 
     o=0
@@ -1238,24 +1261,128 @@ local function buildGui()
     inp(voteTab,"Max votes (0=inf)",C.VoteMax,no(),function(v) local n=tonumber(v); if n then C.VoteMax=math.max(0,n) end end)
 
     o=0
-    wide(themeTab,"Primary color (hex)",C.PrimaryColor,no(),function(v)
-        C.PrimaryColor=v; local c=parseHex(v); if c then PRIMARY=c; buildGui() end
+    lbl(themeTab,"— Themes —",no())
+    local themeRow=Instance.new("Frame")
+    themeRow.Size=UDim2.new(1,0,0,28); themeRow.BackgroundTransparency=1; themeRow.LayoutOrder=no(); themeRow.Parent=themeTab
+    local themeLay=Instance.new("UIListLayout")
+    themeLay.FillDirection=Enum.FillDirection.Horizontal; themeLay.Padding=UDim.new(0,4); themeLay.Parent=themeRow
+    for _,theme in ipairs(THEMES) do
+        local tb=Instance.new("TextButton")
+        tb.Size=UDim2.new(0,54,1,0); tb.BackgroundColor3=theme.p
+        tb.Text=theme.name; tb.TextColor3=Color3.fromRGB(0,0,0)
+        tb.Font=Enum.Font.GothamBold; tb.TextSize=9; tb.Parent=themeRow
+        tb.MouseButton1Click:Connect(function()
+            C.PrimaryColor=colorToHex(theme.p); C.SecondaryColor=colorToHex(theme.s)
+            PRIMARY=theme.p; SECONDARY=theme.s
+            save(); buildGui()
+        end)
+    end
+
+    lbl(themeTab,"— Primary Color —",no())
+    local pPrev=Instance.new("Frame")
+    pPrev.Size=UDim2.new(1,0,0,24); pPrev.BackgroundColor3=PRIMARY; pPrev.BorderSizePixel=0
+    pPrev.LayoutOrder=no(); pPrev.Parent=themeTab
+
+    local pHue=Instance.new("Frame")
+    pHue.Size=UDim2.new(1,0,0,18); pHue.BackgroundColor3=Color3.new(1,1,1); pHue.BorderSizePixel=0
+    pHue.LayoutOrder=no(); pHue.Parent=themeTab
+    local pHueGrad=Instance.new("UIGradient")
+    pHueGrad.Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,Color3.fromRGB(255,0,0)),
+        ColorSequenceKeypoint.new(1/6,Color3.fromRGB(255,255,0)),
+        ColorSequenceKeypoint.new(2/6,Color3.fromRGB(0,255,0)),
+        ColorSequenceKeypoint.new(3/6,Color3.fromRGB(0,255,255)),
+        ColorSequenceKeypoint.new(4/6,Color3.fromRGB(0,0,255)),
+        ColorSequenceKeypoint.new(5/6,Color3.fromRGB(255,0,255)),
+        ColorSequenceKeypoint.new(1,Color3.fromRGB(255,0,0)),
+    })
+    pHueGrad.Parent=pHue
+    pHue.InputBegan:Connect(function(input)
+        if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
+        local rel=(input.Position.X-pHue.AbsolutePosition.X)/pHue.AbsoluteSize.X
+        rel=math.clamp(rel,0,1)
+        local c=Color3.fromHSV(rel,0.85,1)
+        C.PrimaryColor=colorToHex(c); PRIMARY=c
+        pPrev.BackgroundColor3=c
+        save(); scheduleRebuild()
     end)
-    wide(themeTab,"Secondary color (hex)",C.SecondaryColor,no(),function(v)
-        C.SecondaryColor=v; local c=parseHex(v); if c then SECONDARY=c; buildGui() end
+
+    local pGrid=Instance.new("Frame")
+    pGrid.Size=UDim2.new(1,0,0,84); pGrid.BackgroundTransparency=1
+    pGrid.LayoutOrder=no(); pGrid.Parent=themeTab
+    local pGridLay=Instance.new("UIGridLayout")
+    pGridLay.CellSize=UDim2.new(0,20,0,20); pGridLay.CellPadding=UDim2.new(0,2,0,2); pGridLay.Parent=pGrid
+    for _,c in ipairs(PRESETS) do
+        local sw=Instance.new("TextButton")
+        sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.Parent=pGrid
+        sw.MouseButton1Click:Connect(function()
+            C.PrimaryColor=colorToHex(c); PRIMARY=c
+            pPrev.BackgroundColor3=c
+            save(); scheduleRebuild()
+        end)
+    end
+
+    lbl(themeTab,"— Secondary Color —",no())
+    local sPrev=Instance.new("Frame")
+    sPrev.Size=UDim2.new(1,0,0,24); sPrev.BackgroundColor3=SECONDARY; sPrev.BorderSizePixel=0
+    sPrev.LayoutOrder=no(); sPrev.Parent=themeTab
+
+    local sHue=Instance.new("Frame")
+    sHue.Size=UDim2.new(1,0,0,18); sHue.BackgroundColor3=Color3.new(1,1,1); sHue.BorderSizePixel=0
+    sHue.LayoutOrder=no(); sHue.Parent=themeTab
+    local sHueGrad=pHueGrad:Clone(); sHueGrad.Parent=sHue
+    sHue.InputBegan:Connect(function(input)
+        if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
+        local rel=(input.Position.X-sHue.AbsolutePosition.X)/sHue.AbsoluteSize.X
+        rel=math.clamp(rel,0,1)
+        local c=Color3.fromHSV(rel,0.6,0.25)
+        C.SecondaryColor=colorToHex(c); SECONDARY=c
+        sPrev.BackgroundColor3=c
+        save(); scheduleRebuild()
     end)
-    local pvBtn=Instance.new("TextButton")
-    pvBtn.Size=UDim2.new(1,0,0,30); pvBtn.BackgroundColor3=PRIMARY
-    pvBtn.Text="Rebuild GUI with new colors"; pvBtn.TextColor3=Color3.fromRGB(0,0,0)
-    pvBtn.Font=Enum.Font.GothamBold; pvBtn.TextSize=11; pvBtn.LayoutOrder=no(); pvBtn.Parent=themeTab
-    pvBtn.MouseButton1Click:Connect(function() buildGui() end)
+
+    local sGrid=Instance.new("Frame")
+    sGrid.Size=UDim2.new(1,0,0,84); sGrid.BackgroundTransparency=1
+    sGrid.LayoutOrder=no(); sGrid.Parent=themeTab
+    local sGridLay=Instance.new("UIGridLayout")
+    sGridLay.CellSize=UDim2.new(0,20,0,20); sGridLay.CellPadding=UDim2.new(0,2,0,2); sGridLay.Parent=sGrid
+    for _,c in ipairs(PRESETS) do
+        local sw=Instance.new("TextButton")
+        sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.Parent=sGrid
+        sw.MouseButton1Click:Connect(function()
+            C.SecondaryColor=colorToHex(c); SECONDARY=c
+            sPrev.BackgroundColor3=c
+            save(); scheduleRebuild()
+        end)
+    end
+
+    btn(themeTab,"APPLY / REBUILD GUI",PRIMARY,Color3.fromRGB(0,0,0),no(),function() buildGui() end)
 
     tabs["Main"].btn.MouseButton1Click:Fire()
 end
 
--- ============ INIT ============
-captureSrc()
+-- ============ Mobile picker dismiss ============
+local function dismissMobilePicker()
+    if not UIS.TouchEnabled then return end
+    local cam=workspace.CurrentCamera
+    local vp=cam and cam.ViewportSize or Vector2.new(800,600)
+    for _=1,3 do
+        pcall(function()
+            VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,true,game,0)
+            task.wait(0.08)
+            VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,false,game,0)
+        end)
+        task.wait(0.5)
+    end
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Return,false,game)
+        task.wait(0.1)
+        VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Return,false,game)
+    end)
+    print("[Lambda] Mobile picker dismissed")
+end
 
+-- ============ INIT ============
 LocalPlayer.CharacterAdded:Connect(function(ch)
     pdCache.data=nil
     task.wait(0.5)
@@ -1272,7 +1399,6 @@ statsTick()
 if C.AntiAFK then startAFK() end
 if C.AntiVoid then setupVoid() end
 if C.AntiFling then startFling() end
-if C.AntiMurderer then startAntiMurderer() end
 if C.Noclip then startNoclip() end
 if C.HopAt>0 then hopMonitor() end
 if C.HopFriend then friendMonitor() end
@@ -1280,6 +1406,27 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
-print("[Lambda] v0.22 ready | HWID: "..HWID)
-if C.ReexecURL~="" then print("[Lambda] Reexec URL: "..C.ReexecURL)
-else warn("[Lambda] Reexec URL vazio — hop sem reexec. Preencha na aba Server.") end
+-- Auto-launch sequence
+task.spawn(function()
+    if not C.AutoLaunch then return end
+    task.wait(2)
+    dismissMobilePicker()
+    task.wait(2)
+    if not HUM() then
+        pcall(function() LocalPlayer.CharacterAdded:Wait() end)
+        task.wait(2)
+    end
+    local tries=0
+    while tries<30 do
+        if isDeadOrOutOfRound() then task.wait(1); tries=tries+1
+        else break end
+    end
+    if C.AutoLaunch and not C.Farming then
+        print("[Lambda] Auto-launching farm")
+        farm()
+    end
+end)
+
+print("[Lambda] v0.24 ready | HWID: "..HWID)
+print("[Lambda] Auto-launch: "..tostring(C.AutoLaunch).." | Auto-rejoin: "..tostring(C.AutoRejoin))
+print("[Lambda] Threshold: "..tostring(threshold()))
