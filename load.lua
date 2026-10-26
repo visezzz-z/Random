@@ -1,7 +1,7 @@
--- Lambda Hub | v0.27 | By kerli
--- Fix: depth migration, unanchor during aura, correct stat tracking
+-- Lambda Hub | v0.28 | By kerli
+-- Unanchor collection | Stealth=Lay+aura | Fix fling reset | Better shoot
 
-print("[Lambda] v0.27 loading")
+print("[Lambda] v0.28 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -44,8 +44,8 @@ getgenv().LAMBDA = getgenv().LAMBDA or {}
 local C = getgenv().LAMBDA
 
 local DEFAULTS = {
-    Currency="Coin", Speed=35, FarmMode="Stealth", Depth=3, AuraRadius=10,
-    HopAt=6, HopFriend=false, AutoLaunch=true, AutoRejoin=true,
+    Currency="Coin", Speed=35, FarmMode="Stealth", Depth=3, AuraRadius=12,
+    HopAt=6, HopFriend=false, AutoLaunch=true, AutoRejoin=true, AutoGrabGun=true,
     AntiAFK=true, AntiVoid=true, AntiFling=true, Noclip=true, AntiMurderer=false,
     Disable3D=false, VoteMode=0, VoteMax=0,
     ResetInnocent=true, FlingMurderer=false, ShootSheriff=true, ResetAnyRole=false,
@@ -62,12 +62,11 @@ for k,v in pairs(DEFAULTS) do if C[k]==nil then C[k]=v end end
 local saved = prefsLoad()
 if saved then for k,v in pairs(saved) do if C[k]~=nil then C[k]=v end end end
 
--- MIGRATION: v0.24 saved Depth=18 which breaks server-side pickup validation
 if C.Depth and C.Depth > 8 then
-    print("[Lambda] Depth="..C.Depth.." from old version — resetting to 3 (server validates pickup at ~5 studs)")
+    print("[Lambda] Depth="..C.Depth.." reset to 3")
     C.Depth = 3
 end
-if C.AuraRadius and C.AuraRadius < 5 then C.AuraRadius = 10 end
+if C.AuraRadius and C.AuraRadius < 5 then C.AuraRadius = 12 end
 
 C.Farming=false; C.FarmStatus="idle"; C.FarmThread=nil
 C.HopThread=nil; C.FriendThread=nil; C.VoteThread=nil; C.AntiMurdererThread=nil
@@ -77,6 +76,7 @@ C.Stats={Total=0, Start=tick(), Last=0}
 C.MissCount=0; C.WasInRound=false
 C.CollectFails=0
 C.RejoinActive=false
+C.LastGunGrab=0
 
 local function save() local t={} for k,_ in pairs(DEFAULTS) do t[k]=C[k] end prefsSave(t) end
 
@@ -97,8 +97,21 @@ local TEXT_BRIGHT = Color3.fromRGB(220,220,220)
 local function HRP() local c=LocalPlayer.Character; return c and c:FindFirstChild("HumanoidRootPart") end
 local function HUM() local c=LocalPlayer.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 
--- ============ Background GetPlayerData ============
+-- ============ GetPlayerData with immediate fetch fallback ============
 local pdCache={data=nil,ts=0}
+local pdCooldown=0
+local function PD()
+    if pdCooldown > tick() then return pdCache.data end
+    if not pdCache.data or tick() - pdCache.ts > 2 then
+        pdCooldown = tick() + 0.2
+        local ok, data = pcall(function()
+            local r = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+            if r and r:IsA("RemoteFunction") then return r:InvokeServer() end
+        end)
+        if ok and data then pdCache.data = data; pdCache.ts = tick() end
+    end
+    return pdCache.data
+end
 task.spawn(function()
     while true do
         task.wait(0.75)
@@ -109,7 +122,6 @@ task.spawn(function()
         if ok and data then pdCache.data=data; pdCache.ts=tick() end
     end
 end)
-local function PD() return pdCache.data end
 
 local function isDeadOrOutOfRound()
     local hum=HUM()
@@ -251,7 +263,7 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- ============ Bag: prefer C.Currency field over "max across all" ============
+-- ============ Bag ============
 local EVENT_CURR={Candy=true,SnowToken=true,Token=true,Shell=true,Egg=true,Present=true,Gift=true,Gem=true}
 local function threshold()
     if C.Threshold>0 then return C.Threshold end
@@ -268,17 +280,13 @@ local PATTERNS={"coin","cand","token","shell","egg","present","gift","gem","snow
 
 local function statValue()
     local ls=LocalPlayer:FindFirstChild("leaderstats")
-    -- PRIORITY: exact match for C.Currency
     if ls then
         local fields = CURRENCY_FIELDS[C.Currency] or {C.Currency}
         for _,fieldName in ipairs(fields) do
             local ch = ls:FindFirstChild(fieldName)
-            if ch and (ch:IsA("IntValue") or ch:IsA("NumberValue")) then
-                return ch.Value
-            end
+            if ch and (ch:IsA("IntValue") or ch:IsA("NumberValue")) then return ch.Value end
         end
     end
-    -- Fallback: pattern match, but for C.Currency only
     if ls then
         for _,ch in ipairs(ls:GetChildren()) do
             if ch:IsA("IntValue") or ch:IsA("NumberValue") then
@@ -288,7 +296,6 @@ local function statValue()
             end
         end
     end
-    -- Final fallback: any pattern match (last resort, avoids nil)
     if ls then
         for _,ch in ipairs(ls:GetChildren()) do
             if ch:IsA("IntValue") or ch:IsA("NumberValue") then
@@ -305,14 +312,6 @@ local function statValue()
         local fields = CURRENCY_FIELDS[C.Currency] or {C.Currency}
         for _,fieldName in ipairs(fields) do
             if type(me[fieldName])=="number" then return me[fieldName] end
-        end
-        for k,v in pairs(me) do
-            if type(v)=="number" and v>=0 and v<=500 then
-                local n=tostring(k):lower()
-                for _,p in ipairs(PATTERNS) do
-                    if n:find(p) then return v end
-                end
-            end
         end
     end
     return nil
@@ -373,7 +372,7 @@ local function startFling()
     end)
 end
 
--- ============ Coin cache + blacklist ============
+-- ============ Coin cache ============
 local coinCache={parts={},ts=0}
 local coinBlacklist={}
 local function isBlacklisted(c)
@@ -463,87 +462,172 @@ local function travel(targetPos,rot90,spd,coinRef)
     return false
 end
 
-local function beginMove()
-    local h=HRP(); local u=HUM()
-    if u then u.PlatformStand=true; u.AutoRotate=false end
-    if h then h.Anchored=true; h.AssemblyLinearVelocity=Vector3.zero; h.AssemblyAngularVelocity=Vector3.zero end
-end
-
--- ============ Aura: unanchor + BodyVelocity hold, fire touch until collected ============
-local function auraBurst(targetCoin, deadline)
-    local hrp=HRP()
-    local u=HUM()
-    if not hrp or not u then return false end
-
-    local wasAnchored = hrp.Anchored
-    local wasPlatform = u.PlatformStand
-
-    -- Unanchor briefly so server validation passes
-    if wasAnchored then hrp.Anchored = false end
+-- ============ Collection with unanchor ============
+local function unanchorForTouch()
+    local h = HRP()
+    local u = HUM()
+    if not h or not u then return nil, nil, nil end
+    local wasAnchored = h.Anchored
+    if wasAnchored then h.Anchored = false end
     u.PlatformStand = false
-
-    -- Hold position via BodyVelocity(0) so character doesn't fall under gravity
     local bv = Instance.new("BodyVelocity")
-    bv.Name = "LAMBDA_AuraHold"
+    bv.Name = "LAMBDA_Hold"
     bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
     bv.Velocity = Vector3.zero
     bv.P = 100000
-    bv.Parent = hrp
+    bv.Parent = h
+    return bv, wasAnchored, u
+end
 
-    local collectedTarget = false
-    local statBefore = statValue()
+local function reanchorAfterTouch(bv, wasAnchored, u)
+    if bv and bv.Parent then bv:Destroy() end
+    local h = HRP()
+    if h and h.Parent then
+        h.AssemblyLinearVelocity = Vector3.zero
+        h.AssemblyAngularVelocity = Vector3.zero
+        if wasAnchored then h.Anchored = true end
+    end
+    if u and u.Parent then
+        u.PlatformStand = true
+    end
+end
 
-    while C.Farming and tick() < deadline do
-        local cur = HRP()
-        if not cur then break end
-        -- Keep still (BodyVelocity + explicit zero for safety)
-        cur.AssemblyLinearVelocity = Vector3.zero
-        cur.AssemblyAngularVelocity = Vector3.zero
+-- Standard/Lay: travel to coin, unanchor, touch until collected
+local function collectNormal(coin, rot90)
+    local h = HRP(); local u = HUM()
+    if not h or not u or not coin or not coin.Parent then return false end
 
+    if (h.Position - coin.Position).Magnitude > 2.5 then
+        if not travel(coin.Position, rot90, C.Speed, coin) then return false end
+    end
+    if not coin.Parent then return true end
+
+    local bv, wasAnchored, curU = unanchorForTouch()
+    if not bv then return false end
+
+    local got = false
+    local start = tick()
+    while tick() - start < 1.0 and C.Farming do
+        if not coin.Parent then got = true; break end
+        pcall(function()
+            firetouchinterest(h, coin, 0)
+            firetouchinterest(h, coin, 1)
+        end)
+        task.wait(0.015)
+    end
+
+    reanchorAfterTouch(bv, wasAnchored, curU)
+    return got
+end
+
+-- Stealth: travel below coin (lay pose), unanchor, aura burst, fallback rise
+local function collectStealth(coin)
+    local h = HRP(); local u = HUM()
+    if not h or not u or not coin or not coin.Parent then return false end
+
+    -- Travel to 3 studs below coin (lay pose)
+    local target = Vector3.new(coin.Position.X, coin.Position.Y - C.Depth, coin.Position.Z)
+    if (h.Position - target).Magnitude > 2.5 then
+        if not travel(target, true, C.Speed, coin) then return false end
+    end
+
+    local bv, wasAnchored, curU = unanchorForTouch()
+    if not bv then return false end
+
+    local got = false
+    local start = tick()
+    while tick() - start < 1.0 and C.Farming do
+        if not coin.Parent then got = true; break end
         local anyNear = false
         for _, c in ipairs(getCoins()) do
             if c.Parent and not isBlacklisted(c) then
-                local d = (cur.Position - c.Position).Magnitude
+                local d = (h.Position - c.Position).Magnitude
                 if d <= C.AuraRadius then
                     anyNear = true
                     pcall(function()
-                        firetouchinterest(cur, c, 0)
-                        firetouchinterest(cur, c, 1)
+                        firetouchinterest(h, c, 0)
+                        firetouchinterest(h, c, 1)
                     end)
                 end
             end
         end
-
-        -- Success if target coin got destroyed OR stats went up
-        if targetCoin and not targetCoin.Parent then
-            collectedTarget = true
-            break
-        end
-        local statAfter = statValue()
-        if statBefore and statAfter and statAfter > statBefore then
-            collectedTarget = true
-            break
-        end
-
         if not anyNear then break end
-        task.wait(0.02)
+        task.wait(0.015)
     end
 
-    if bv and bv.Parent then bv:Destroy() end
-
-    if hrp and hrp.Parent then
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.AssemblyAngularVelocity = Vector3.zero
-        if wasAnchored then hrp.Anchored = true end
+    -- Fallback: rise to coin if aura failed
+    if not got and coin.Parent and C.Farming then
+        reanchorAfterTouch(bv, wasAnchored, curU)
+        -- Rise
+        travel(coin.Position, true, C.Speed * 1.5, coin)
+        -- Collect at coin
+        local bv2, wasA2, curU2 = unanchorForTouch()
+        if bv2 then
+            local s2 = tick()
+            while tick() - s2 < 0.5 and C.Farming do
+                if not coin.Parent then got = true; break end
+                pcall(function()
+                    firetouchinterest(h, coin, 0)
+                    firetouchinterest(h, coin, 1)
+                end)
+                task.wait(0.015)
+            end
+            reanchorAfterTouch(bv2, wasA2, curU2)
+        end
+    else
+        reanchorAfterTouch(bv, wasAnchored, curU)
     end
-    if u and u.Parent and wasPlatform then
-        u.PlatformStand = true
-    end
 
-    return collectedTarget
+    return got
 end
 
--- ============ Role / actions ============
+-- ============ Auto grab gun ============
+local function findGroundGun()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if (obj:IsA("Tool") or obj:IsA("Model")) and (obj.Name == "Gun" or obj.Name == "Revolver") then
+            if not Players:GetPlayerFromCharacter(obj.Parent) then
+                local handle = obj:FindFirstChild("Handle") or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+                if handle then return handle, obj end
+            end
+        end
+    end
+    return nil
+end
+
+local function grabGun()
+    if tick() - C.LastGunGrab < 5 then return false end
+    local ch = LocalPlayer.Character
+    if not ch then return false end
+    if ch:FindFirstChild("Gun") then return false end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp and bp:FindFirstChild("Gun") then return false end
+
+    local handle = findGroundGun()
+    if not handle then return false end
+
+    C.LastGunGrab = tick()
+    C.FarmStatus = "grab gun"
+    local h = HRP()
+    if not h then return false end
+
+    if (h.Position - handle.Position).Magnitude > 5 then
+        travel(handle.Position, false, C.Speed * 1.5, nil)
+    end
+
+    local bv, wasAnchored, curU = unanchorForTouch()
+    if not bv then return false end
+    task.wait(0.03)
+    pcall(function()
+        firetouchinterest(h, handle, 0)
+        task.wait(0.05)
+        firetouchinterest(h, handle, 1)
+    end)
+    task.wait(0.1)
+    reanchorAfterTouch(bv, wasAnchored, curU)
+    return true
+end
+
+-- ============ Role ============
 local function role()
     local d=PD()
     if d and d[LocalPlayer.Name] then
@@ -585,7 +669,7 @@ local function killAll()
     end
 end
 
--- ============ Fling (AFP-style, only works on unarmored targets) ============
+-- ============ Fling (AFP-style) ============
 local function flingMurderer()
     local murderer = findMurderer()
     if not murderer or not murderer.Character then return false end
@@ -597,9 +681,6 @@ local function flingMurderer()
 
     if myRoot.Anchored then myRoot.Anchored = false end
     myHum.PlatformStand = true
-    for _, track in ipairs(myHum:GetPlayingAnimationTracks()) do
-        pcall(function() track:Stop() end)
-    end
 
     local origHeight = Workspace.FallenPartsDestroyHeight
     local savedCF = myRoot.CFrame
@@ -617,12 +698,10 @@ local function flingMurderer()
         bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
         bv.Velocity = Vector3.new(0, -50000, 0)
         bv.Parent = myRoot
-
         local bg = Instance.new("BodyGyro")
         bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
         bg.P = 1000000
         bg.Parent = myRoot
-
         Workspace.FallenPartsDestroyHeight = 0/0
 
         local start = tick()
@@ -630,9 +709,7 @@ local function flingMurderer()
             if not tChar or not tRoot.Parent then break end
             if not myRoot or not myRoot.Parent then break end
             local headPos = tHead and tHead.Position or (tRoot.Position + Vector3.new(0, 2.5, 0))
-            pcall(function()
-                myRoot.CFrame = CFrame.new(headPos) * CFrame.Angles(math.pi/2, 0, 0)
-            end)
+            pcall(function() myRoot.CFrame = CFrame.new(headPos) * CFrame.Angles(math.pi/2, 0, 0) end)
             myRoot.AssemblyLinearVelocity = Vector3.new(0, -50000, 0)
             myRoot.AssemblyAngularVelocity = Vector3.new(7500, 7500, 7500)
             for _ = 1, 5 do
@@ -645,7 +722,6 @@ local function flingMurderer()
             end
             RunService.Heartbeat:Wait()
         end
-
         pcall(function() bv:Destroy() end)
         pcall(function() bg:Destroy() end)
         Workspace.FallenPartsDestroyHeight = origHeight
@@ -671,41 +747,53 @@ local function flingMurderer()
     return true
 end
 
--- ============ Shoot: multi-method, loop until dead ============
+-- ============ Shoot: aim at murderer screen position ============
 local function shootAtMurderer()
     local gun = equip("Gun")
     if not gun then return false end
+
     local m = findMurderer()
     if not m or not m.Character then return false end
-    local mHrp = m.Character:FindFirstChild("HumanoidRootPart")
     local mHead = m.Character:FindFirstChild("Head")
     local mUpper = m.Character:FindFirstChild("UpperTorso")
+    local mHrp = m.Character:FindFirstChild("HumanoidRootPart")
     local hrp = HRP()
     if not mHrp or not hrp then return false end
 
-    pcall(function() hrp.CFrame = CFrame.new(hrp.Position, mHrp.Position) end)
     local cam = workspace.CurrentCamera
-    if cam then pcall(function() cam.CFrame = CFrame.new(cam.CFrame.Position, mHrp.Position) end) end
+    if not cam then return false end
+
+    -- Aim character at murderer
+    pcall(function() hrp.CFrame = CFrame.new(hrp.Position, mHrp.Position) end)
     task.wait(0.05)
 
-    pcall(function() gun:Activate() end)
+    -- Get murderer screen position for click
+    local targetPart = mHead or mUpper or mHrp
+    local screenPos, onScreen = cam:WorldToViewportPoint(targetPart.Position)
 
-    local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
-    local center = Vector2.new(vp.X / 2, vp.Y / 2)
-    local isMobile = UIS.TouchEnabled and not UIS.MouseEnabled
-    if isMobile then
-        pcall(function() VirtualUser:Button1Down(center, cam.CFrame) end)
-        task.wait(0.06)
-        pcall(function() VirtualUser:Button1Up(center, cam.CFrame) end)
-    else
-        pcall(function()
-            VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-            task.wait(0.06)
-            VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-        end)
+    -- Method 1: Tool:Activate (gun's built-in)
+    pcall(function() gun:Activate() end)
+    task.wait(0.05)
+
+    -- Method 2: Click at murderer's screen position
+    if onScreen then
+        local isMobile = UIS.TouchEnabled and not UIS.MouseEnabled
+        if isMobile then
+            pcall(function() VirtualUser:Button1Down(Vector2.new(screenPos.X, screenPos.Y), cam.CFrame) end)
+            task.wait(0.08)
+            pcall(function() VirtualUser:Button1Up(Vector2.new(screenPos.X, screenPos.Y), cam.CFrame) end)
+        else
+            pcall(function()
+                VirtualInputManager:SendMouseMoveEvent(screenPos.X, screenPos.Y, game)
+                task.wait(0.03)
+                VirtualInputManager:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, true, game, 0)
+                task.wait(0.08)
+                VirtualInputManager:SendMouseButtonEvent(screenPos.X, screenPos.Y, 0, false, game, 0)
+            end)
+        end
     end
 
-    -- Fire all remote events in gun.Events with multiple target candidates
+    -- Method 3: Fire all remotes
     local ev = gun:FindFirstChild("Events")
     if ev then
         for _, r in ipairs(ev:GetChildren()) do
@@ -716,27 +804,27 @@ local function shootAtMurderer()
             end
         end
     end
-
-    -- Fire HandleTouched if present (some guns use this pattern)
-    local ht = gun:FindFirstChild("HandleTouched")
-    if ht and ht:IsA("RemoteEvent") then
-        pcall(function() ht:FireServer(mHrp) end)
-        if mUpper then pcall(function() ht:FireServer(mUpper) end) end
+    local handle = gun:FindFirstChild("Handle")
+    if handle then
+        local ht = handle:FindFirstChild("HandleTouched")
+        if ht and ht:IsA("RemoteEvent") then
+            pcall(function() ht:FireServer(mHrp) end)
+            if mUpper then pcall(function() ht:FireServer(mUpper) end) end
+        end
     end
 
     return true
 end
 
 local function shootLoop()
-    -- Wait up to 2s for murderer to be identified (GetPlayerData can lag behind)
     local waited = 0
-    while waited < 2 and C.Farming do
+    while waited < 3 and C.Farming do
         if findMurderer() then break end
         task.wait(0.2)
         waited = waited + 0.2
     end
 
-    local deadline = tick() + 10
+    local deadline = tick() + 12
     local shots = 0
     while tick() < deadline and C.Farming do
         local m = findMurderer()
@@ -745,7 +833,7 @@ local function shootLoop()
         if not mh or mh.Health <= 0 then break end
         if not shootAtMurderer() then break end
         shots = shots + 1
-        task.wait(0.35)
+        task.wait(0.3)
     end
     return shots > 0
 end
@@ -765,8 +853,13 @@ local function fullBag()
             C.FarmStatus = "flinging"
             flingMurderer()
             did = true
+            task.wait(1.5)  -- extra buffer for fling to complete
         end
-        if C.ResetInnocent and not did then hardReset(); return end
+        if C.ResetInnocent then
+            hardReset()
+            return
+        end
+        if did then return end  -- fling happened, don't auto-reset unless user wants
     elseif r == "Sheriff" then
         if C.ShootSheriff then
             C.FarmStatus = "shooting"
@@ -844,62 +937,40 @@ local function farm()
             if u:GetState()==Enum.HumanoidStateType.Dead then C.FarmStatus="dead state"; cleanup(); task.wait(0.3); continue end
             if isDeadOrOutOfRound() then C.FarmStatus="dead/lobby"; cleanup(); task.wait(0.3); continue end
 
+            -- Auto-grab gun if sheriff and gun on ground
+            if C.AutoGrabGun and role() == "Sheriff" then
+                local ch = LocalPlayer.Character
+                local bp = LocalPlayer:FindFirstChild("Backpack")
+                local hasGun = (ch and ch:FindFirstChild("Gun")) or (bp and bp:FindFirstChild("Gun"))
+                if not hasGun and findGroundGun() then
+                    grabGun()
+                    task.wait(0.3)
+                end
+            end
+
             local coin=nearestCoin()
             if coin then
+                local got = false
                 if C.FarmMode=="Stealth" then
-                    C.FarmStatus="aura"
-                    if not h.Anchored then beginMove(); task.wait(0.05) end
-                    local target = Vector3.new(coin.Position.X, coin.Position.Y - C.Depth, coin.Position.Z)
-                    if (h.Position - target).Magnitude > 2 then
-                        travel(target, false, C.Speed, nil)
-                    end
-                    -- Stay at position, fire touch until collected (up to 1.5s)
-                    local got = auraBurst(coin, tick() + 1.5)
-                    if got then
-                        C.CollectFails = 0
-                        coinCache.ts = 0
-                    elseif coin.Parent then
-                        blacklist(coin)
-                        C.CollectFails = C.CollectFails + 1
-                    else
-                        C.CollectFails = 0
-                        coinCache.ts = 0
-                    end
-                    task.wait(0.01)
+                    C.FarmStatus="stealth"
+                    if not h.Anchored then h.Anchored=true; u.PlatformStand=true; u.AutoRotate=false end
+                    got = collectStealth(coin)
                 else
-                    C.FarmStatus="travel"
-                    if not h.Anchored then beginMove(); task.wait(0.03) end
-                    local ok = false
-                    if (h.Position - coin.Position).Magnitude > 2.5 then
-                        ok = travel(coin.Position, C.FarmMode=="Lay", C.Speed, coin)
-                    else
-                        ok = true
-                    end
-                    if ok and coin.Parent then
-                        C.FarmStatus="collect"
-                        local statBefore = statValue()
-                        local t0 = tick()
-                        while coin.Parent and C.Farming and tick()-t0 < 0.5 do
-                            local ch = LocalPlayer.Character
-                            local curHrp = HRP()
-                            if curHrp and ch then
-                                pcall(function()
-                                    firetouchinterest(curHrp, coin, 0)
-                                    firetouchinterest(curHrp, coin, 1)
-                                end)
-                            end
-                            local sv = statValue()
-                            if statBefore and sv and sv > statBefore then break end
-                            task.wait(0.015)
-                        end
-                        if coin.Parent then
-                            blacklist(coin); C.CollectFails = C.CollectFails + 1
-                        else
-                            C.CollectFails = 0; coinCache.ts = 0
-                        end
-                    end
-                    task.wait(0.01)
+                    C.FarmStatus="collect"
+                    if not h.Anchored then h.Anchored=true; u.PlatformStand=true; u.AutoRotate=false end
+                    got = collectNormal(coin, C.FarmMode=="Lay")
                 end
+                if got then
+                    C.CollectFails = 0
+                    coinCache.ts = 0
+                elseif coin.Parent then
+                    blacklist(coin)
+                    C.CollectFails = C.CollectFails + 1
+                else
+                    C.CollectFails = 0
+                    coinCache.ts = 0
+                end
+                task.wait(0.02)
             else
                 C.FarmStatus="no coins"
                 cleanup()
@@ -934,9 +1005,9 @@ end
 
 local function pool()
     local raw=httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",game.PlaceId))
-    if not raw then return {} end
+    if not raw then print("[Lambda] Hop: no HTTP"); return {} end
     local ok,res=pcall(function() return HttpService:JSONDecode(raw) end)
-    if not ok or not res or not res.data then return {} end
+    if not ok or not res or not res.data then print("[Lambda] Hop: bad JSON"); return {} end
     local t={}
     for _,s in ipairs(res.data) do
         if s.id~=game.JobId and s.playing>=1 and s.playing<=3 and s.playing<s.maxPlayers then table.insert(t,s) end
@@ -945,27 +1016,91 @@ local function pool()
     return t
 end
 
+local function tryTeleport(serverId)
+    local failed = false
+    local failReason = nil
+    local conn = TeleportService.TeleportInitFailed:Connect(function(plr, place, reason)
+        if plr == LocalPlayer then failed = true; failReason = reason end
+    end)
+
+    local ok, err
+    -- Try TeleportAsync first (modern)
+    if TeleportService.TeleportAsync then
+        local opts
+        if serverId then
+            opts = Instance.new("TeleportOptions")
+            opts.ServerInstanceId = serverId
+        end
+        ok, err = pcall(function()
+            TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, opts)
+        end)
+    end
+    -- Fallback to TeleportToPlaceInstance
+    if (not ok) and serverId then
+        ok, err = pcall(function()
+            local opts = Instance.new("TeleportOptions")
+            opts.ServerInstanceId = serverId
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer, opts)
+        end)
+    end
+    -- Fallback to plain Teleport
+    if not ok then
+        ok, err = pcall(function()
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        end)
+    end
+
+    task.wait(2)
+    conn:Disconnect()
+
+    if failed then
+        print("[Lambda] Hop failed: " .. tostring(failReason))
+        return false
+    end
+    if not ok then
+        print("[Lambda] Hop error: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
 local function hop()
     if C.IsHopping then return false end
     C.IsHopping=true; C.IsTeleporting=true; C.HopStatus="fetch"
     local list=pool()
-    if #list==0 then C.HopStatus="no servers"; C.IsHopping=false; C.IsTeleporting=false; return false end
-    for i,s in ipairs(list) do
-        C.HopStatus=string.format("try %d/%d",i,#list)
-        local ok,res=pcall(function()
-            local o=Instance.new("TeleportOptions"); o.ServerInstanceId=s.id
-            return TeleportService:TeleportToPlaceInstance(game.PlaceId,s.id,LocalPlayer,o)
-        end)
-        if ok and not (typeof(res)=="EnumItem" and res==Enum.TeleportState.Failed) then
-            C.HopStatus="OK"; task.wait(4); C.IsHopping=false; C.IsTeleporting=false; return true
+    print("[Lambda] Hop: " .. #list .. " servers")
+    if #list == 0 then
+        C.HopStatus = "empty pool, fallback"
+        if tryTeleport(nil) then
+            C.HopStatus = "fallback OK"
+            task.wait(3)
+            C.IsHopping=false; C.IsTeleporting=false
+            return true
         end
-        task.wait(0.5)
+        C.HopStatus = "FAILED"
+        C.IsHopping=false; C.IsTeleporting=false
+        return false
     end
-    C.HopStatus="fallback"
-    local ok=pcall(function() TeleportService:Teleport(game.PlaceId,LocalPlayer) end)
-    task.wait(3); C.IsHopping=false; C.IsTeleporting=false
-    C.HopStatus=ok and "fallback OK" or "FAILED"
-    return ok
+    for i, s in ipairs(list) do
+        C.HopStatus = string.format("try %d/%d", i, #list)
+        if tryTeleport(s.id) then
+            C.HopStatus = "OK"
+            task.wait(3)
+            C.IsHopping=false; C.IsTeleporting=false
+            return true
+        end
+        task.wait(0.3)
+    end
+    C.HopStatus = "all failed, fallback"
+    if tryTeleport(nil) then
+        C.HopStatus = "fallback OK"
+        task.wait(3)
+        C.IsHopping=false; C.IsTeleporting=false
+        return true
+    end
+    C.HopStatus = "FAILED"
+    C.IsHopping=false; C.IsTeleporting=false
+    return false
 end
 
 local function hopNow() if C.IsHopping or RejoinState.active then return end task.spawn(hop) end
@@ -1110,6 +1245,31 @@ local function getDraw(p)
 end
 local function hideAll(t) for _,d in pairs(t) do pcall(function() d.Visible=false end) end end
 
+-- Broad detection: any BasePart in coin container, any BasePart in ground gun
+local function getCoinVisualParts()
+    local parts = {}
+    for _, c in ipairs(getContainers()) do
+        for _, d in ipairs(c:GetDescendants()) do
+            if d:IsA("BasePart") then table.insert(parts, d) end
+        end
+    end
+    return parts
+end
+
+local function getGroundGunParts()
+    local parts = {}
+    for _, obj in ipairs(Workspace:GetChildren()) do
+        if (obj:IsA("Tool") or obj:IsA("Model")) and (obj.Name == "Gun" or obj.Name == "Revolver") then
+            if not Players:GetPlayerFromCharacter(obj.Parent) then
+                for _, p in ipairs(obj:GetDescendants()) do
+                    if p:IsA("BasePart") then table.insert(parts, p) end
+                end
+            end
+        end
+    end
+    return parts
+end
+
 local anyPlayerDrawing=false
 local anyHighlight=false
 local anyCoin=false
@@ -1175,6 +1335,7 @@ local hlAccum=0
 RunService.Heartbeat:Connect(function(dt)
     if not (anyHighlight or anyCoin or anyGun) then return end
     hlAccum=hlAccum+dt; if hlAccum<0.2 then return end; hlAccum=0
+
     for _,p in ipairs(Players:GetPlayers()) do
         if p==LocalPlayer then continue end
         local role=roleFor(p); local cat=roleToCat(role)
@@ -1204,67 +1365,63 @@ RunService.Heartbeat:Connect(function(dt)
             sb.Color3=ROLE_COLORS[role] or ROLE_COLORS.Unknown
         end
     end
+
     if anyCoin then
         local wantCH=visOn("Coin","CH"); local wantOL=visOn("Coin","OL"); local wantHL=visOn("Coin","HL"); local wantBX=visOn("Coin","BX")
         local wantFill=wantCH or wantHL; local wantEdge=wantOL or wantHL
         local seen={}
-        for _,coin in ipairs(getCoins()) do
-            seen[coin]=true
-            local hl=ESP.coinHL[coin]; local bx=ESP.coinBX[coin]
+        for _,part in ipairs(getCoinVisualParts()) do
+            seen[part]=true
+            local hl=ESP.coinHL[part]; local bx=ESP.coinBX[part]
             if wantFill or wantEdge then
-                if not hl or hl.Parent~=coin then
+                if not hl or hl.Parent~=part then
                     if hl then pcall(function() hl:Destroy() end) end
-                    hl=Instance.new("Highlight"); hl.Name="LAMBDA_CoinHL"; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=coin; ESP.coinHL[coin]=hl
+                    hl=Instance.new("Highlight"); hl.Name="LAMBDA_CoinHL"; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=part; ESP.coinHL[part]=hl
                 end
                 hl.FillColor=COIN_COL; hl.OutlineColor=COIN_COL
                 hl.FillTransparency=wantFill and 0.5 or 1
                 hl.OutlineTransparency=wantEdge and 0 or 1
-            elseif hl then pcall(function() hl:Destroy() end); ESP.coinHL[coin]=nil end
+            elseif hl then pcall(function() hl:Destroy() end); ESP.coinHL[part]=nil end
             if wantBX then
-                if not bx or bx.Adornee~=coin then
+                if not bx or bx.Adornee~=part then
                     if bx then pcall(function() bx:Destroy() end) end
-                    bx=Instance.new("SelectionBox"); bx.Adornee=coin; bx.Color3=COIN_COL; bx.LineThickness=0.06; bx.SurfaceTransparency=1; bx.Parent=coin; ESP.coinBX[coin]=bx
+                    bx=Instance.new("SelectionBox"); bx.Adornee=part; bx.Color3=COIN_COL; bx.LineThickness=0.06; bx.SurfaceTransparency=1; bx.Parent=part; ESP.coinBX[part]=bx
                 end
-            elseif bx then pcall(function() bx:Destroy() end); ESP.coinBX[coin]=nil end
+            elseif bx then pcall(function() bx:Destroy() end); ESP.coinBX[part]=nil end
         end
-        for part,hl in pairs(ESP.coinHL) do if not seen[part] or not part.Parent then pcall(function() hl:Destroy() end); ESP.coinHL[part]=nil end end
-        for part,bx in pairs(ESP.coinBX) do if not seen[part] or not part.Parent then pcall(function() bx:Destroy() end); ESP.coinBX[part]=nil end end
+        for p,hl in pairs(ESP.coinHL) do if not seen[p] or not p.Parent then pcall(function() hl:Destroy() end); ESP.coinHL[p]=nil end end
+        for p,bx in pairs(ESP.coinBX) do if not seen[p] or not p.Parent then pcall(function() bx:Destroy() end); ESP.coinBX[p]=nil end end
     else
         for _,hl in pairs(ESP.coinHL) do pcall(function() hl:Destroy() end) end
         for _,bx in pairs(ESP.coinBX) do pcall(function() bx:Destroy() end) end
         ESP.coinHL={}; ESP.coinBX={}
     end
+
     if anyGun then
         local wantCH=visOn("Gun","CH"); local wantOL=visOn("Gun","OL"); local wantHL=visOn("Gun","HL"); local wantBX=visOn("Gun","BX")
         local wantFill=wantCH or wantHL; local wantEdge=wantOL or wantHL
         local seen={}
-        for _,o in ipairs(Workspace:GetChildren()) do
-            local isGun=(o:IsA("Tool") or o:IsA("Model")) and (o.Name=="Gun" or o.Name=="Revolver")
-            if isGun and not Players:GetPlayerFromCharacter(o.Parent) then
-                local handle=o:FindFirstChild("Handle") or (o:IsA("Model") and o.PrimaryPart) or o:FindFirstChildWhichIsA("BasePart")
-                if handle then
-                    seen[handle]=true
-                    local hl=ESP.gunHL[handle]; local bx=ESP.gunBX[handle]
-                    if wantFill or wantEdge then
-                        if not hl or hl.Parent~=handle then
-                            if hl then pcall(function() hl:Destroy() end) end
-                            hl=Instance.new("Highlight"); hl.Name="LAMBDA_GunHL"; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=handle; ESP.gunHL[handle]=hl
-                        end
-                        hl.FillColor=GUN_COL; hl.OutlineColor=GUN_COL
-                        hl.FillTransparency=wantFill and 0.5 or 1
-                        hl.OutlineTransparency=wantEdge and 0 or 1
-                    elseif hl then pcall(function() hl:Destroy() end); ESP.gunHL[handle]=nil end
-                    if wantBX then
-                        if not bx or bx.Adornee~=handle then
-                            if bx then pcall(function() bx:Destroy() end) end
-                            bx=Instance.new("SelectionBox"); bx.Adornee=handle; bx.Color3=GUN_COL; bx.LineThickness=0.08; bx.SurfaceTransparency=1; bx.Parent=handle; ESP.gunBX[handle]=bx
-                        end
-                    elseif bx then pcall(function() bx:Destroy() end); ESP.gunBX[handle]=nil end
+        for _,part in ipairs(getGroundGunParts()) do
+            seen[part]=true
+            local hl=ESP.gunHL[part]; local bx=ESP.gunBX[part]
+            if wantFill or wantEdge then
+                if not hl or hl.Parent~=part then
+                    if hl then pcall(function() hl:Destroy() end) end
+                    hl=Instance.new("Highlight"); hl.Name="LAMBDA_GunHL"; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=part; ESP.gunHL[part]=hl
                 end
-            end
+                hl.FillColor=GUN_COL; hl.OutlineColor=GUN_COL
+                hl.FillTransparency=wantFill and 0.5 or 1
+                hl.OutlineTransparency=wantEdge and 0 or 1
+            elseif hl then pcall(function() hl:Destroy() end); ESP.gunHL[part]=nil end
+            if wantBX then
+                if not bx or bx.Adornee~=part then
+                    if bx then pcall(function() bx:Destroy() end) end
+                    bx=Instance.new("SelectionBox"); bx.Adornee=part; bx.Color3=GUN_COL; bx.LineThickness=0.08; bx.SurfaceTransparency=1; bx.Parent=part; ESP.gunBX[part]=bx
+                end
+            elseif bx then pcall(function() bx:Destroy() end); ESP.gunBX[part]=nil end
         end
-        for part,hl in pairs(ESP.gunHL) do if not seen[part] or not part.Parent then pcall(function() hl:Destroy() end); ESP.gunHL[part]=nil end end
-        for part,bx in pairs(ESP.gunBX) do if not seen[part] or not part.Parent then pcall(function() bx:Destroy() end); ESP.gunBX[part]=nil end end
+        for p,hl in pairs(ESP.gunHL) do if not seen[p] or not p.Parent then pcall(function() hl:Destroy() end); ESP.gunHL[p]=nil end end
+        for p,bx in pairs(ESP.gunBX) do if not seen[p] or not p.Parent then pcall(function() bx:Destroy() end); ESP.gunBX[p]=nil end end
     else
         for _,hl in pairs(ESP.gunHL) do pcall(function() hl:Destroy() end) end
         for _,bx in pairs(ESP.gunBX) do pcall(function() bx:Destroy() end) end
@@ -1333,7 +1490,7 @@ function buildGui()
 
     local title=Instance.new("TextLabel")
     title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0)
-    title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.27"
+    title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.28"
     title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13
     title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
 
@@ -1511,6 +1668,7 @@ function buildGui()
     tog(actionsTab,"Fling murderer when full",C.FlingMurderer,no(),function(s) C.FlingMurderer=s end)
     lbl(actionsTab,"— Sheriff —",no())
     tog(actionsTab,"Shoot murderer when full",C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
+    tog(actionsTab,"Auto grab gun",C.AutoGrabGun,no(),function(s) C.AutoGrabGun=s end)
     lbl(actionsTab,"— Murderer —",no())
     tog(actionsTab,"Kill all when full",C.KillMurderer,no(),function(s) C.KillMurderer=s end)
     tog(actionsTab,"Reset when full",C.ResetMurderer,no(),function(s) C.ResetMurderer=s end)
@@ -1703,16 +1861,17 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
+-- Auto-launch: start farm immediately (farm loop handles lobby/round transitions)
 task.spawn(function()
     if not C.AutoLaunch then return end
-    task.wait(2); dismissMobilePicker(); task.wait(2)
-    if not HUM() then pcall(function() LocalPlayer.CharacterAdded:Wait() end); task.wait(2) end
-    local tries=0
-    while tries<30 do
-        if isDeadOrOutOfRound() then task.wait(1); tries=tries+1 else break end
+    task.wait(3)
+    dismissMobilePicker()
+    task.wait(1)
+    if C.AutoLaunch and not C.Farming then
+        print("[Lambda] Auto-launch: starting farm")
+        farm()
     end
-    if C.AutoLaunch and not C.Farming then farm() end
 end)
 
-print("[Lambda] v0.27 ready | HWID: "..HWID)
+print("[Lambda] v0.28 ready | HWID: "..HWID)
 print("[Lambda] Depth="..C.Depth.." AuraRadius="..C.AuraRadius)
