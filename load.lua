@@ -48,7 +48,7 @@ local C = getgenv().LAMBDA
 local DEFAULTS = {
     Currency="Coin", Speed=35, FarmMode="Stealth", Depth=3, AuraRadius=12, CoinAura=true,
     HopAt=6, HopFriend=false, AutoLaunch=true, AutoRejoin=true, AutoGrabGun=true,
-    Farming=false,  -- PERSISTED farm state
+    Farming=true,  -- PERSISTED farm state
     AntiAFK=true, AntiVoid=true, AntiFling=true, Noclip=true, AntiMurderer=false,
     Disable3D=false, VoteMode=0, VoteMax=0,
     ResetInnocent=true, FlingMurderer=false, ShootSheriff=true, ResetAnyRole=false,
