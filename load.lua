@@ -1,7 +1,7 @@
--- Lambda Hub | v0.30 | By kerli
--- Fling fix | Predicted aimbot | Persist farm state | Robust hop
+-- Lambda Hub | v0.31 | By kerli
+-- Fling fix | Predicted aimbot | Persist farm state | Robust hop | GUI Minimization Fix | Auto-launch
 
-print("[Lambda] v0.30 loading")
+print("[Lambda] v0.31 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -196,7 +196,6 @@ local function safeRejoin(reason)
     end)
 end
 
--- Disconnect native kick connection via getconnections
 pcall(function()
     if type(getconnections) ~= "function" then return end
     local conns = getconnections(LocalPlayer.Idled)
@@ -205,7 +204,6 @@ pcall(function()
     end
 end)
 
--- Metatable hooks
 pcall(function()
     if not (getrawmetatable and setreadonly and newcclosure) then return end
     local mt=getrawmetatable(game)
@@ -237,7 +235,6 @@ pcall(function()
     setreadonly(mt,true)
 end)
 
--- Anti-AFK
 local afkConn
 local function startAFK()
     if afkConn then afkConn:Disconnect() end
@@ -246,7 +243,6 @@ local function startAFK()
     end)
 end
 
--- Anti-Void
 local voidConn; local origDH=Workspace.FallenPartsDestroyHeight
 local function setupVoid()
     if not C.AntiVoid then Workspace.FallenPartsDestroyHeight=origDH; if voidConn then voidConn:Disconnect(); voidConn=nil end; return end
@@ -255,7 +251,6 @@ local function setupVoid()
     voidConn=LocalPlayer.CharacterAdded:Connect(function() task.wait(0.1); Workspace.FallenPartsDestroyHeight=0/0 end)
 end
 
--- Anti-Fling
 local function startAntiFling()
     local lastP,lastT=nil,tick(); local lastC=nil
     RunService.Heartbeat:Connect(function()
@@ -277,7 +272,6 @@ local function startAntiFling()
     end)
 end
 
--- Noclip
 local noclipConn
 local function startNoclip()
     if noclipConn then noclipConn:Disconnect() end
@@ -341,8 +335,8 @@ end
 -- ============ COINS ============
 local coinCache={parts={},ts=0}
 local coinBlacklist={}
-local function isBlacklisted(c) local t=coinBlacklist[c]; if not t then return false end; if tick()-t>1.5 then coinBlacklist[c]=nil; return false end; return true end
-local function blacklist(c) if c then coinBlacklist[c]=tick() end; for k,v in pairs(coinBlacklist) do if tick()-v>3 then coinBlacklist[k]=nil end end end
+local function isBlacklisted(c) local t=coinBlacklist[c]; if not t then return false end; if tick()-t>5 then coinBlacklist[c]=nil; return false end; return true end
+local function blacklist(c) if c then coinBlacklist[c]=tick() end; for k,v in pairs(coinBlacklist) do if tick()-v>5 then coinBlacklist[k]=nil end end end
 local function getContainers()
     local list={}
     for _,o in ipairs(Workspace:GetChildren()) do
@@ -417,7 +411,7 @@ local function collectNormal(coin, rot90)
     while tick()-start<0.8 and C.Farming do
         if not coin.Parent then got=true; break end
         pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end)
-        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; break end
+        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; blacklist(coin); break end
         task.wait(0.015)
     end
     reanchorAfterTouch(bv,bg,wasA,curU); return got
@@ -436,7 +430,7 @@ local function collectStealth(coin)
         else
             pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end)
         end
-        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; break end
+        local sv=statValue(); if statBefore and sv and sv>statBefore then got=true; blacklist(coin); break end
         task.wait(0.015)
     end
     if not got and coin.Parent and C.Farming then
@@ -512,45 +506,27 @@ local function flingTarget(targetPlayer)
     local myChar=LocalPlayer.Character; if not myChar then return false end
     local myHum=myChar:FindFirstChildOfClass("Humanoid"); local myRoot=myChar:FindFirstChild("HumanoidRootPart")
     if not myHum or not myRoot then return false end
-    if myRoot.Anchored then myRoot.Anchored=false end
-    myHum.PlatformStand=true
-    for _,track in ipairs(myHum:GetPlayingAnimationTracks()) do pcall(function() track:Stop() end) end
-    local origHeight=Workspace.FallenPartsDestroyHeight; local savedCF=myRoot.CFrame
-    local success=false
+    local tChar=targetPlayer.Character; local tRoot=tChar and tChar:FindFirstChild("HumanoidRootPart")
+    if not tRoot then return false end
 
-    for attempt=1,3 do
-        local tChar=targetPlayer.Character; if not tChar then break end
-        local tHum=tChar:FindFirstChildOfClass("Humanoid"); if not tHum or tHum.Health<=0 then success=true; break end
-        local tRoot=tChar:FindFirstChild("HumanoidRootPart"); local tHead=tChar:FindFirstChild("Head")
-        if not tRoot then break end
-
-        local bv=Instance.new("BodyVelocity"); bv.MaxForce=Vector3.new(math.huge,math.huge,math.huge); bv.Velocity=Vector3.new(0,-50000,0); bv.Parent=myRoot
-        local bg=Instance.new("BodyGyro"); bg.MaxTorque=Vector3.new(math.huge,math.huge,math.huge); bg.P=1000000; bg.Parent=myRoot
-        Workspace.FallenPartsDestroyHeight=0/0
-        setRootRef(myRoot, tRoot)
-
-        local start=tick()
-        while tick()-start<1.0 and C.Farming do
-            if not tChar or not tRoot.Parent then break end
-            if not myRoot or not myRoot.Parent then break end
-            local headPos = tHead and tHead.Position or (tRoot.Position+Vector3.new(0,2.5,0))
-            pcall(function() myRoot.CFrame=CFrame.new(headPos)*CFrame.Angles(math.pi/2,0,0) end)
-            myRoot.AssemblyLinearVelocity=Vector3.new(0,-50000,0)
-            myRoot.AssemblyAngularVelocity=Vector3.new(7500,7500,7500)
-            for _=1,5 do touch(myRoot,tRoot); if tHead then touch(myRoot,tHead) end end
-            RunService.Heartbeat:Wait()
-        end
-        pcall(function() bv:Destroy() end); pcall(function() bg:Destroy() end)
-        Workspace.FallenPartsDestroyHeight=origHeight; clearRootRef(myRoot)
-
-        local postHum=targetPlayer.Character and targetPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if not postHum or postHum.Health<=0 then success=true; break end
-        task.wait(0.2)
+    myHum:ChangeState(Enum.HumanoidStateType.Physics)
+    myRoot.Anchored=false
+    
+    local startTime=tick(); local success=false
+    while tick()-startTime<2.0 and C.Farming do
+        if not tRoot.Parent or not myRoot.Parent then break end
+        local offset=tRoot.CFrame*CFrame.new(0,0,2)
+        myRoot.CFrame=offset
+        local dir=(tRoot.Position-myRoot.Position).Unit
+        myRoot.AssemblyLinearVelocity=dir*150+Vector3.new(0,50,0)
+        myRoot.AssemblyAngularVelocity=Vector3.new(0,100,0)
+        pcall(function() firetouchinterest(myRoot,tRoot,0); firetouchinterest(myRoot,tRoot,1) end)
+        local tHum=tChar:FindFirstChildOfClass("Humanoid")
+        if tHum and tHum.Health<=0 then success=true; break end
+        task.wait(0.05)
     end
-
-    Workspace.FallenPartsDestroyHeight=origHeight
-    if myRoot and myRoot.Parent then pcall(function() myRoot.CFrame=savedCF; myRoot.AssemblyLinearVelocity=Vector3.zero; myRoot.AssemblyAngularVelocity=Vector3.zero end) end
-    if myHum and myHum.Parent then myHum.PlatformStand=false; pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end) end
+    myHum:ChangeState(Enum.HumanoidStateType.GettingUp)
+    myRoot.AssemblyLinearVelocity=Vector3.zero; myRoot.AssemblyAngularVelocity=Vector3.zero
     return success
 end
 
@@ -581,7 +557,6 @@ local function shootAtMurderer()
     local hrp=HRP(); if not mHrp or not hrp then return false end
     local cam=workspace.CurrentCamera; if not cam then return false end
 
-    -- Prediction based on ping
     local ping=getPing()
     local velocity=mHrp.AssemblyLinearVelocity
     local predTime = (ping/1000) * C.PredMultiplier
@@ -612,7 +587,6 @@ local function shootAtMurderer()
         end
     end
 
-    -- Fire remotes with predicted target
     local ev=gun:FindFirstChild("Events")
     if ev then
         for _,r in ipairs(ev:GetChildren()) do
@@ -762,31 +736,49 @@ end
 
 -- ============ HOP ============
 local function httpGet(u)
-    local m={function() return game:HttpGet(u) end, function() if syn and syn.request then return syn.request({Url=u,Method="GET"}).Body end end, function() if request then return request({Url=u,Method="GET"}).Body end end, function() if http_request then return http_request({Url=u,Method="GET"}).Body end end}
-    for _,f in ipairs(m) do local ok,r=pcall(f); if ok and type(r)=="string" and #r>0 then return r end end
-    return nil
+    local success, result = pcall(function()
+        if request then return request({Url=u, Method="GET"}).Body end
+        if syn and syn.request then return syn.request({Url=u, Method="GET"}).Body end
+        if http_request then return http_request({Url=u, Method="GET"}).Body end
+        return game:HttpGet(u)
+    end)
+    return success and result or nil
 end
+
 local function pool()
-    local raw=httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",game.PlaceId))
+    local raw = httpGet(string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId))
     if not raw then return {} end
-    local ok,res=pcall(function() return HttpService:JSONDecode(raw) end)
+    local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
     if not ok or not res or not res.data then return {} end
-    local t={}
-    for _,s in ipairs(res.data) do if s.id~=game.JobId and s.playing>=1 and s.playing<=3 and s.playing<s.maxPlayers then table.insert(t,s) end end
-    for i=#t,2,-1 do local j=math.random(1,i); t[i],t[j]=t[j],t[i] end
+    local t = {}
+    for _, s in ipairs(res.data) do 
+        if s.id ~= game.JobId and s.playing >= 1 and s.playing < s.maxPlayers then 
+            table.insert(t, s) 
+        end 
+    end
     return t
 end
+
 local function tryTeleport(serverId)
-    local failed=false
-    local conn=TeleportService.TeleportInitFailed:Connect(function(plr) if plr==LocalPlayer then failed=true end end)
-    local ok
+    local failed = false
+    local conn = TeleportService.TeleportInitFailed:Connect(function(plr) 
+        if plr == LocalPlayer then failed = true end 
+    end)
+    
+    local ok = false
     if serverId then
-        ok=pcall(function() local o=Instance.new("TeleportOptions"); o.ServerInstanceId=serverId; TeleportService:TeleportToPlaceInstance(game.PlaceId,serverId,LocalPlayer,o) end)
+        ok = pcall(function() 
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer) 
+        end)
+    else
+        ok = pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
     end
-    if not ok then ok=pcall(function() TeleportService:Teleport(game.PlaceId,LocalPlayer) end) end
-    task.wait(2); conn:Disconnect()
-    return (not failed) and ok
+    
+    task.wait(3)
+    pcall(function() conn:Disconnect() end)
+    return ok and not failed
 end
+
 local function hop()
     if C.IsHopping then return false end
     C.IsHopping=true; C.IsTeleporting=true; C.HopStatus="fetch"
@@ -985,11 +977,22 @@ function buildGui()
 
     local main=Instance.new("Frame"); main.Size=UDim2.new(0,390,0,520); main.Position=UDim2.new(0,30,0,30); main.BackgroundColor3=SECONDARY; main.BorderSizePixel=0; main.Active=true; main.Draggable=true; main.Parent=gui
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,28); titleBar.BackgroundColor3=SECONDARY; titleBar.BorderSizePixel=0; titleBar.Parent=main
-    local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0); title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.30"; title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
+    local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0); title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.31"; title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
     local min=Instance.new("TextButton"); min.Size=UDim2.new(0,24,0,20); min.Position=UDim2.new(1,-56,0,4); min.BackgroundColor3=Color3.fromRGB(70,70,70); min.Text="—"; min.TextColor3=Color3.fromRGB(255,255,255); min.Font=Enum.Font.GothamBold; min.TextSize=13; min.Parent=titleBar
     local close=Instance.new("TextButton"); close.Size=UDim2.new(0,24,0,20); close.Position=UDim2.new(1,-28,0,4); close.BackgroundColor3=Color3.fromRGB(120,30,30); close.Text="X"; close.TextColor3=Color3.fromRGB(255,255,255); close.Font=Enum.Font.GothamBold; close.TextSize=13; close.Parent=titleBar
+    
+    local statusBar=Instance.new("Frame"); statusBar.Size=UDim2.new(1,0,0,40); statusBar.Position=UDim2.new(0,0,1,-40); statusBar.BackgroundColor3=SECONDARY; statusBar.BorderSizePixel=0; statusBar.Visible=false; statusBar.Parent=main
+    local stats=Instance.new("TextLabel"); stats.Size=UDim2.new(1,-10,1,0); stats.Position=UDim2.new(0,5,0,0); stats.BackgroundTransparency=1; stats.TextColor3=PRIMARY; stats.Font=Enum.Font.Code; stats.TextSize=10; stats.TextXAlignment=Enum.TextXAlignment.Left; stats.TextYAlignment=Enum.TextYAlignment.Center; stats.Text="Collected: 0 | Per hour: 0 | Bag: ?/50 | Fails: 0 | Status: idle"; stats.Parent=statusBar
+
     local collapsed=false
-    min.MouseButton1Click:Connect(function() collapsed=not collapsed; main.Size=collapsed and UDim2.new(0,390,0,28) or UDim2.new(0,390,0,520); min.Text=collapsed and "+" or "—" end)
+    min.MouseButton1Click:Connect(function() 
+        collapsed=not collapsed
+        if collapsed then
+            main.Size=UDim2.new(0,390,0,68); content.Visible=false; tabBar.Visible=false; statusBar.Visible=true; min.Text="+"
+        else
+            main.Size=UDim2.new(0,390,0,520); content.Visible=true; tabBar.Visible=true; statusBar.Visible=false; min.Text="—"
+        end
+    end)
     close.MouseButton1Click:Connect(function()
         for _,d in pairs(ESP.highlights) do pcall(function() d:Destroy() end) end
         for _,d in pairs(ESP.sboxes) do pcall(function() d:Destroy() end) end
@@ -1071,8 +1074,14 @@ function buildGui()
     tog(mainTab,"Coin Aura",C.CoinAura,no(),function(s) C.CoinAura=s end)
     inp(mainTab,"Aura radius",C.AuraRadius,no(),function(v) local n=tonumber(v); if n then C.AuraRadius=math.clamp(n,5,25) end end)
     lbl(mainTab,"— Bag —",no()); inp(mainTab,"Threshold (50=default)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
-    local stats=Instance.new("TextLabel"); stats.Size=UDim2.new(1,0,0,72); stats.BackgroundColor3=Color3.fromRGB(30,28,0); stats.BorderSizePixel=0; stats.TextColor3=PRIMARY; stats.Font=Enum.Font.Code; stats.TextSize=10; stats.Text="Collected: 0\nPer hour: 0\nBag: ?/50\nFails: 0\nStatus: idle"; stats.LayoutOrder=no(); stats.Parent=mainTab
-    task.spawn(function() while stats.Parent do task.wait(0.5); local b=statValue(); stats.Text=string.format("Collected: %d\nPer hour: %d\nBag: %s/%d\nFails: %d\nStatus: %s",C.Stats.Total,rate(),b and tostring(b) or "?",threshold(),C.CollectFails,C.FarmStatus or "idle") end end)
+    
+    task.spawn(function() 
+        while stats.Parent do 
+            task.wait(0.5)
+            local b=statValue()
+            stats.Text=string.format("Collected: %d | Per hour: %d | Bag: %s/%d | Fails: %d | Status: %s",C.Stats.Total,rate(),b and tostring(b) or "?",threshold(),C.CollectFails,C.FarmStatus or "idle") 
+        end 
+    end)
 
     -- COMBAT
     o=0
@@ -1201,16 +1210,14 @@ if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end
 
 buildGui()
 
--- Auto-launch: restore persisted farm state
+-- Auto-launch: automatically start farming upon execution
 task.spawn(function()
-    if not C.AutoLaunch then return end
     task.wait(3); dismissMobilePicker(); task.wait(1)
-    if C.Farming and not C.FarmThread then
-        print("[Lambda] Auto-launch: restoring farm (was ON)")
-        farm()
-    end
+    print("[Lambda] Auto-launch: starting farm automatically")
+    C.Farming=true
+    farm()
 end)
 
-print("[Lambda] v0.30 ready | HWID: "..HWID)
+print("[Lambda] v0.31 ready | HWID: "..HWID)
 print("[Lambda] Depth="..C.Depth.." AuraRadius="..C.AuraRadius.." CoinAura="..tostring(C.CoinAura))
 print("[Lambda] PredMultiplier="..C.PredMultiplier.." Farming(saved)="..tostring(C.Farming))
