@@ -1,7 +1,7 @@
--- Lambda Hub | v0.32 | By kerli
--- Polished GUI | Fixed Autofarm | Fixed Server Hop | Auto-Start
+-- Lambda Hub | v0.33 | By kerli
+-- Kinetic Displacement Fling | Zero-Delay Harvesting | Robust Realm Shifting | Persistent Stats
 
-print("[Lambda] v0.32 loading")
+print("[Lambda] v0.33 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -269,6 +269,7 @@ local coinBlacklist={}
 local function isBlacklisted(c) local t=coinBlacklist[c]; if not t then return false end; if tick()-t>5 then coinBlacklist[c]=nil; return false end; return true end
 local function blacklist(c) if c then coinBlacklist[c]=tick() end; for k,v in pairs(coinBlacklist) do if tick()-v>5 then coinBlacklist[k]=nil end end end
 local function removeCoinFromCache(coin)
+    if not coin then return end
     for i, p in ipairs(coinCache.parts) do
         if p == coin then
             table.remove(coinCache.parts, i)
@@ -356,7 +357,6 @@ local function collectNormal(coin, rot90)
         task.wait(0.05)
     end
     reanchorAfterTouch(bv,bg,wasA,curU); 
-    if got then removeCoinFromCache(coin) end
     return got
 end
 
@@ -381,7 +381,6 @@ local function collectStealth(coin)
         local bv2,bg2,wasA2,curU2=unanchorForTouch(true)
         if bv2 then local s2=tick(); while tick()-s2<0.5 and C.Farming do if not coin.Parent then got=true; break end; pcall(function() firetouchinterest(h,coin,0); firetouchinterest(h,coin,1) end); task.wait(0.05) end; reanchorAfterTouch(bv2,bg2,wasA2,curU2) end
     else reanchorAfterTouch(bv,bg,wasA,curU) end
-    if got then removeCoinFromCache(coin) end
     return got
 end
 
@@ -440,35 +439,40 @@ local function killAll()
     end
 end
 
--- ============ FLING ============
-local function touch(a,b) pcall(function() firetouchinterest(a,b,0); firetouchinterest(a,b,1) end) end
-
+-- ============ FLING (Kinetic Spin Displacement) ============
 local function flingTarget(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return false end
-    local myChar=LocalPlayer.Character; if not myChar then return false end
-    local myHum=myChar:FindFirstChildOfClass("Humanoid"); local myRoot=myChar:FindFirstChild("HumanoidRootPart")
-    if not myHum or not myRoot then return false end
-    local tChar=targetPlayer.Character; local tRoot=tChar and tChar:FindFirstChild("HumanoidRootPart")
-    if not tRoot then return false end
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+    local tChar = targetPlayer.Character
+    local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+    if not (myRoot and myHum and tRoot) then return false end
 
     myHum:ChangeState(Enum.HumanoidStateType.Physics)
-    myRoot.Anchored=false
+    myRoot.Anchored = false
     
-    local startTime=tick(); local success=false
-    while tick()-startTime<2.0 and C.Farming do
+    local bav = Instance.new("BodyAngularVelocity")
+    bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bav.AngularVelocity = Vector3.new(0, 120, 0)
+    bav.Parent = myRoot
+
+    local startTime = tick()
+    local success = false
+    
+    while tick() - startTime < 2.5 and C.Farming do
         if not tRoot.Parent or not myRoot.Parent then break end
-        local offset=tRoot.CFrame*CFrame.new(0,0,2)
-        myRoot.CFrame=offset
-        local dir=(tRoot.Position-myRoot.Position).Unit
-        myRoot.AssemblyLinearVelocity=dir*150+Vector3.new(0,50,0)
-        myRoot.AssemblyAngularVelocity=Vector3.new(0,100,0)
-        pcall(function() firetouchinterest(myRoot,tRoot,0); firetouchinterest(myRoot,tRoot,1) end)
-        local tHum=tChar:FindFirstChildOfClass("Humanoid")
-        if tHum and tHum.Health<=0 then success=true; break end
-        task.wait(0.05)
+        local tHum = tChar:FindFirstChildOfClass("Humanoid")
+        if tHum and tHum.Health <= 0 then success = true; break end
+        
+        myRoot.CFrame = tRoot.CFrame * CFrame.Angles(math.rad(90), 0, 0)
+        myRoot.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
+        task.wait()
     end
+    
+    pcall(function() bav:Destroy() end)
+    myRoot.AssemblyLinearVelocity = Vector3.zero
+    myRoot.AssemblyAngularVelocity = Vector3.zero
     myHum:ChangeState(Enum.HumanoidStateType.GettingUp)
-    myRoot.AssemblyLinearVelocity=Vector3.zero; myRoot.AssemblyAngularVelocity=Vector3.zero
     return success
 end
 
@@ -636,6 +640,18 @@ local function farmLoopFn()
 
         local coin=nearestCoin()
         if coin then
+            -- ZERO DELAY CACHE REMOVAL: Hook the coin's destruction instantly
+            task.spawn(function()
+                local conn
+                conn = coin.AncestryChanged:Connect(function()
+                    if not coin.Parent then
+                        removeCoinFromCache(coin)
+                        if conn.Connected then conn:Disconnect() end
+                    end
+                end)
+                task.delay(3, function() if conn.Connected then conn:Disconnect() end end)
+            end)
+
             local got=false
             if C.FarmMode=="Stealth" then
                 C.FarmStatus=C.CoinAura and "stealth+aura" or "stealth"
@@ -650,6 +666,7 @@ local function farmLoopFn()
                 if not h.Anchored then h.Anchored=true; u.PlatformStand=true; u.AutoRotate=false end
                 got=collectNormal(coin,false)
             end
+            
             if got then 
                 C.CollectFails=0
                 removeCoinFromCache(coin)
@@ -659,7 +676,7 @@ local function farmLoopFn()
                 C.CollectFails=0
             end
             coinCache.ts = 0
-            task.wait(0.02)
+            task.wait(0.01)
         else C.FarmStatus="no coins"; cleanup(); task.wait(0.3) end
 
         local st=statValue()
@@ -681,43 +698,59 @@ local function stopFarm()
     cleanup()
 end
 
--- ============ HOP ============
+-- ============ HOP (Robust Realm Shifting) ============
 local function hop()
-    if C.IsHopping then return false end
-    C.IsHopping=true; C.IsTeleporting=true; C.HopStatus="fetching"
+    if C.IsHopping then return end
+    C.IsHopping = true
+    C.HopStatus = "fetching"
     
-    local servers = {}
-    local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
-    local success, result = pcall(function() return game:HttpGet(url) end)
-    
-    if success and result then
+    task.spawn(function()
+        local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+        local success, result = pcall(function() return game:HttpGet(url) end)
+        
+        if not success or not result then
+            C.HopStatus = "http failed"
+            C.IsHopping = false
+            return
+        end
+        
         local ok, res = pcall(function() return HttpService:JSONDecode(result) end)
-        if ok and res and res.data then
-            for _, s in ipairs(res.data) do
-                if s.id ~= game.JobId and s.playing < s.maxPlayers then
-                    table.insert(servers, s.id)
-                end
+        if not ok or not res or not res.data then
+            C.HopStatus = "json failed"
+            C.IsHopping = false
+            return
+        end
+        
+        local servers = {}
+        for _, s in ipairs(res.data) do
+            if s.id ~= game.JobId and s.playing < s.maxPlayers and s.playing > 0 then
+                table.insert(servers, s.id)
             end
         end
-    end
-    
-    if #servers == 0 then
-        C.HopStatus="fallback"
-        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+        
+        if #servers == 0 then
+            C.HopStatus = "no servers"
+            C.IsHopping = false
+            return
+        end
+        
+        C.HopStatus = "hopping"
+        local targetServer = servers[math.random(1, #servers)]
+        local options = Instance.new("TeleportOptions")
+        options.ServerInstanceId = targetServer
+        
+        local tpSuccess, tpErr = pcall(function()
+            TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options)
+        end)
+        
+        if not tpSuccess then
+            C.HopStatus = "fallback"
+            pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+        end
+        
         task.wait(5)
-        C.IsHopping=false; C.IsTeleporting=false
-        return
-    end
-    
-    local targetServer = servers[math.random(1, #servers)]
-    C.HopStatus="hopping"
-    
-    local options = Instance.new("TeleportOptions")
-    options.ServerInstanceId = targetServer
-    
-    pcall(function() TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options) end)
-    task.wait(5)
-    C.IsHopping=false; C.IsTeleporting=false
+        C.IsHopping = false
+    end)
 end
 
 local function hopNow() if C.IsHopping then return end task.spawn(hop) end
@@ -898,44 +931,44 @@ function buildGui()
 
     local main=Instance.new("Frame"); main.Size=UDim2.new(0,390,0,520); main.Position=UDim2.new(0,30,0,30); main.BackgroundColor3=SECONDARY; main.BorderSizePixel=0; main.Active=true; main.Draggable=true; main.Parent=gui
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,28); titleBar.BackgroundColor3=SECONDARY; titleBar.BorderSizePixel=0; titleBar.Parent=main
-    local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0); title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.32"; title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
+    local title=Instance.new("TextLabel"); title.Size=UDim2.new(1,-80,1,0); title.Position=UDim2.new(0,10,0,0); title.BackgroundTransparency=1; title.Text="Lambda Hub | v0.33"; title.TextColor3=PRIMARY; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
     local min=Instance.new("TextButton"); min.Size=UDim2.new(0,24,0,20); min.Position=UDim2.new(1,-56,0,4); min.BackgroundColor3=Color3.fromRGB(70,70,70); min.Text="—"; min.TextColor3=Color3.fromRGB(255,255,255); min.Font=Enum.Font.GothamBold; min.TextSize=13; min.Parent=titleBar
     local close=Instance.new("TextButton"); close.Size=UDim2.new(0,24,0,20); close.Position=UDim2.new(1,-28,0,4); close.BackgroundColor3=Color3.fromRGB(120,30,30); close.Text="X"; close.TextColor3=Color3.fromRGB(255,255,255); close.Font=Enum.Font.GothamBold; close.TextSize=13; close.Parent=titleBar
     
-    local statusBar=Instance.new("Frame"); 
-    statusBar.Size=UDim2.new(1,0,0,52); 
-    statusBar.Position=UDim2.new(0,0,0,28); 
-    statusBar.BackgroundColor3=Color3.fromRGB(20,20,20); 
-    statusBar.BorderSizePixel=0; 
-    statusBar.Visible=false; 
+    local statusBar=Instance.new("Frame")
+    statusBar.Size=UDim2.new(1,0,0,60)
+    statusBar.Position=UDim2.new(0,0,0,28)
+    statusBar.BackgroundColor3=Color3.fromRGB(20,20,20)
+    statusBar.BorderSizePixel=0
+    statusBar.Visible=false
     statusBar.Parent=main
     
-    local stats=Instance.new("TextLabel"); 
-    stats.Size=UDim2.new(1,-10,1,0); 
-    stats.Position=UDim2.new(0,5,0,0); 
-    stats.BackgroundTransparency=1; 
-    stats.TextColor3=PRIMARY; 
-    stats.Font=Enum.Font.Code; 
-    stats.TextSize=11; 
-    stats.TextXAlignment=Enum.TextXAlignment.Left; 
-    stats.TextYAlignment=Enum.TextYAlignment.Center; 
-    stats.Text="Collected: 0 | Per hour: 0 | Bag: ?/50 | Fails: 0 | Status: idle"; 
-    stats.Parent=statusBar
+    local minStatsLabel=Instance.new("TextLabel")
+    minStatsLabel.Size=UDim2.new(1,-10,1,0)
+    minStatsLabel.Position=UDim2.new(0,5,0,0)
+    minStatsLabel.BackgroundTransparency=1
+    minStatsLabel.TextColor3=PRIMARY
+    minStatsLabel.Font=Enum.Font.Code
+    minStatsLabel.TextSize=11
+    minStatsLabel.TextXAlignment=Enum.TextXAlignment.Left
+    minStatsLabel.TextYAlignment=Enum.TextYAlignment.Center
+    minStatsLabel.TextWrapped=true
+    minStatsLabel.Parent=statusBar
 
     local collapsed=false
     min.MouseButton1Click:Connect(function() 
         collapsed=not collapsed
         if collapsed then
-            main.Size=UDim2.new(0,390,0,80); 
-            content.Visible=false; 
-            tabBar.Visible=false; 
-            statusBar.Visible=true; 
+            main.Size=UDim2.new(0,390,0,88)
+            content.Visible=false
+            tabBar.Visible=false
+            statusBar.Visible=true
             min.Text="+"
         else
-            main.Size=UDim2.new(0,390,0,520); 
-            content.Visible=true; 
-            tabBar.Visible=true; 
-            statusBar.Visible=false; 
+            main.Size=UDim2.new(0,390,0,520)
+            content.Visible=true
+            tabBar.Visible=true
+            statusBar.Visible=false
             min.Text="—"
         end
     end)
@@ -1022,14 +1055,35 @@ function buildGui()
     inp(mainTab,"Aura radius",C.AuraRadius,no(),function(v) local n=tonumber(v); if n then C.AuraRadius=math.clamp(n,5,25) end end)
     lbl(mainTab,"— Bag —",no()); inp(mainTab,"Threshold (50=default)",C.Threshold,no(),function(v) local n=tonumber(v); if n then C.Threshold=math.max(0,n) end end)
     
+    local statsFrame = Instance.new("Frame")
+    statsFrame.Size = UDim2.new(1, -10, 0, 60)
+    statsFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    statsFrame.BorderSizePixel = 0
+    statsFrame.LayoutOrder = no()
+    statsFrame.Parent = mainTab
+
+    local statsLabel = Instance.new("TextLabel")
+    statsLabel.Size = UDim2.new(1, -10, 1, 0)
+    statsLabel.Position = UDim2.new(0, 5, 0, 0)
+    statsLabel.BackgroundTransparency = 1
+    statsLabel.TextColor3 = PRIMARY
+    statsLabel.Font = Enum.Font.Code
+    statsLabel.TextSize = 12
+    statsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statsLabel.TextYAlignment = Enum.TextYAlignment.Center
+    statsLabel.TextWrapped = true
+    statsLabel.Parent = statsFrame
+    
     task.spawn(function() 
-        while stats and stats.Parent do 
+        while statsLabel and statsLabel.Parent do 
             task.wait(0.5)
             local b=statValue()
             local rateVal = rate()
             local thresh = threshold()
-            stats.Text=string.format("Collected: %d | Per hour: %d | Bag: %s/%d | Fails: %d | Status: %s",
-                C.Stats.Total, rateVal, b and tostring(b) or "?", thresh, C.CollectFails, C.FarmStatus or "idle") 
+            local text = string.format("Collected: %d | Per hour: %d\nBag: %s/%d | Fails: %d\nStatus: %s",
+                C.Stats.Total, rateVal, b and tostring(b) or "?", thresh, C.CollectFails, C.FarmStatus or "idle")
+            statsLabel.Text = text
+            minStatsLabel.Text = text
         end 
     end)
 
@@ -1167,4 +1221,4 @@ task.spawn(function()
     end
 end)
 
-print("[Lambda] v0.32 ready | HWID: "..HWID)
+print("[Lambda] v0.33 ready | HWID: "..HWID)
