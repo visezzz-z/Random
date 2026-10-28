@@ -1,7 +1,7 @@
--- Lambda Hub | v0.43 | By kerli
--- Dense Compact GUI | Grid Visuals | Adaptive Frame | Persistent Realm Hop
+-- Lambda Hub | v0.44 | By kerli
+-- Crash-Resistant Realm Hop | Single Teleport Channel | No Mixed Calls
 
-print("[Lambda] v0.43 loading")
+print("[Lambda] v0.44 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -945,10 +945,13 @@ local function stopFarm()
     cleanup()
 end
 
--- ============ PERSISTENT REALM HOP ============
--- If the script is still alive N seconds after a teleport call, the jump
--- did not happen. We verify by survival, iterate the pool, and finish with
--- a guaranteed emergency jump. No reliance on events that may never fire.
+-- ============ CRASH-RESISTANT REALM HOP ============
+-- One teleport channel only. No mixing of Teleport/TeleportAsync. No piled-up
+-- calls. Each attempt is a single clean invocation; we wait for an explicit
+-- TeleportInitFailed before retrying, and cool down between gates so the
+-- teleport state fully settles. The final fallback rides the SAME channel.
+local HAS_TELEPORT_ASYNC = typeof(TeleportService.TeleportAsync) == "function"
+
 local function httpGet(u)
     local success, result = pcall(function()
         if request then return request({Url=u, Method="GET"}).Body end
@@ -983,75 +986,86 @@ local function collectServerCandidates()
     end
     return cands
 end
-local function attemptTeleport(serverId)
-    local hasAsync = typeof(TeleportService.TeleportAsync) == "function"
-    if hasAsync then
-        local ok = pcall(function()
+
+local function issueTeleport(serverId)
+    if HAS_TELEPORT_ASYNC then
+        return pcall(function()
             local options = Instance.new("TeleportOptions")
-            options.ServerInstanceId = serverId
+            if serverId then options.ServerInstanceId = serverId end
             TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options)
         end)
-        if ok then return true end
+    else
+        if serverId then
+            return pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+            end)
+        else
+            return pcall(function()
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
+            end)
+        end
     end
-    pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer) end)
-    return true
 end
-local function emergencyRandomJump()
-    local okT = pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-    if not okT and typeof(TeleportService.TeleportAsync) == "function" then
-        pcall(function() TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}) end)
+
+local function waitForTeleportResult(timeout)
+    local failed = false
+    local conn = TeleportService.TeleportInitFailed:Connect(function(player)
+        if player == LocalPlayer then failed = true end
+    end)
+    local elapsed = 0
+    while elapsed < timeout and not failed do
+        task.wait(0.5)
+        elapsed = elapsed + 0.5
     end
+    pcall(function() conn:Disconnect() end)
+    return failed and "failed" or "likely_ok"
 end
+
 local function hop()
     if C.IsHopping then return end
     C.IsHopping = true
     task.spawn(function()
         C.HopStatus = "scanning realms"
         local ok, cands = pcall(collectServerCandidates)
-        if not ok then cands = {} end
+        if not ok or type(cands) ~= "table" then cands = {} end
+
         local ones, others = {}, {}
-        for _, s in ipairs(cands or {}) do
+        for _, s in ipairs(cands) do
             if s.playing == 1 then table.insert(ones, s) else table.insert(others, s) end
         end
         local pool = cands
         if #ones <= 15 and #others > 0 then pool = others end
+
         for i = #pool, 2, -1 do
             local j = math.random(i)
             pool[i], pool[j] = pool[j], pool[i]
         end
-        local maxAttempts = math.min(#pool, 5)
+
+        local maxAttempts = math.min(#pool, 3)
 
         for i = 1, maxAttempts do
             if not C.IsHopping then return end
-            local s = pool[i]
-            C.HopStatus = string.format("attempt %d/%d · %d inside", i, maxAttempts, s.playing)
+            C.HopStatus = string.format("hop %d/%d (%d inside)", i, maxAttempts, pool[i].playing)
 
-            local failed = false
-            local conn = TeleportService.TeleportInitFailed:Connect(function(player)
-                if player == LocalPlayer then failed = true end
-            end)
+            issueTeleport(pool[i].id)
+            local result = waitForTeleportResult(6)
 
-            attemptTeleport(s.id)
-
-            local t0 = tick()
-            while tick() - t0 < 6 and not failed do task.wait(0.3) end
-            conn:Disconnect()
-
-            if failed then
-                C.HopStatus = "realm rejected, next"
-                task.wait(0.4)
-            else
-                -- No explicit failure: give the transition 2 more seconds.
-                task.wait(2)
-                -- Still executing here means no transition occurred: silent fail.
-                C.HopStatus = "no transition, next"
+            if result == "likely_ok" then
+                C.HopStatus = "transitioning..."
+                task.wait(4)
+                C.IsHopping = false
+                return
             end
+
+            C.HopStatus = "rejected, cooling down"
+            task.wait(2)
         end
 
-        C.HopStatus = "emergency random jump"
-        task.wait(0.8)
-        emergencyRandomJump()
-        task.wait(6)
+        if not C.IsHopping then return end
+        C.HopStatus = "random jump"
+        task.wait(1.5)
+        issueTeleport(nil)
+        task.wait(8)
         C.IsHopping = false
     end)
 end
@@ -1125,8 +1139,7 @@ local function getCoinVisualParts() local parts={}; for _,c in ipairs(getContain
 local function getGroundGunParts()
     local parts={}; for _,obj in ipairs(Workspace:GetChildren()) do if (obj:IsA("Tool") or obj:IsA("Model")) and (obj.Name=="Gun" or obj.Name=="Revolver") and not Players:GetPlayerFromCharacter(obj.Parent) then for _,p in ipairs(obj:GetDescendants()) do if p:IsA("BasePart") then table.insert(parts,p) end end end end; return parts
 end
-local anyPlayerDrawing=false; local anyHighlight=false; anyCoin=false; anyGun=false
-local anyCoin=false; local anyGun=false
+local anyPlayerDrawing=false; local anyHighlight=false; local anyCoin=false; local anyGun=false
 local function rebuildVisualCache()
     anyPlayerDrawing=false; anyHighlight=false
     for _,cat in ipairs({"Murderer","Sheriff","Hero","Innocent"}) do
@@ -1248,7 +1261,6 @@ local function buildGui()
     pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
     gui.Parent=parent; MAIN_GUI=gui
 
-    -- Adaptive frame: fills the device properly, no double-shrink
     local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
     local isMobile = UIS.TouchEnabled and not UIS.MouseEnabled
     local ROOT_W, ROOT_H
@@ -1277,11 +1289,10 @@ local function buildGui()
     uiScale.Parent = root
     uiScale.Scale = C.GuiScale
 
-    -- ===== Title bar =====
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,TITLE_H); titleBar.BackgroundTransparency=1; titleBar.Parent=root
     local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(9,9); dot.Position=UDim2.new(0,10,0.5,-4); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,5)
     local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,70,1,0); title.Position=UDim2.new(0,24,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
-    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.43"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
+    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.44"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
 
     local function winBtn(xOff, txt, bg, cb)
         local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(22,18); b.Position=UDim2.new(1,xOff,0.5,-9); b.BackgroundColor3=bg; b.BackgroundTransparency=0.35; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,4)
@@ -1289,17 +1300,14 @@ local function buildGui()
         return b
     end
 
-    -- ===== Minimized stats bar =====
     local minBar=Instance.new("Frame"); minBar.Size=UDim2.new(1,-10,0,MIN_STATS_H); minBar.Position=UDim2.new(0,5,0,TITLE_H); minBar.BackgroundColor3=INSET; minBar.BackgroundTransparency=0.1; minBar.BorderSizePixel=0; minBar.Visible=false; minBar.Parent=root; corner(minBar,7)
     strokeOf(minBar, PRIMARY, 1, 0.8)
     local minStats=Instance.new("TextLabel"); minStats.Size=UDim2.new(1,-10,1,-4); minStats.Position=UDim2.new(0,5,0,2); minStats.BackgroundTransparency=1; minStats.TextColor3=PRIMARY; minStats.Font=Enum.Font.Code; minStats.TextSize=10; minStats.TextXAlignment=Enum.TextXAlignment.Left; minStats.TextYAlignment=Enum.TextYAlignment.Top; minStats.TextWrapped=true; minStats.Text=""; minStats.Parent=minBar
 
-    -- ===== Sidebar =====
     local sidebar=Instance.new("Frame"); sidebar.Size=UDim2.new(0,SIDE_W,1,-TITLE_H-5); sidebar.Position=UDim2.new(0,0,0,TITLE_H+2); sidebar.BackgroundTransparency=1; sidebar.Parent=root
     local sideLay=Instance.new("UIListLayout"); sideLay.Padding=UDim.new(0,2); sideLay.SortOrder=Enum.SortOrder.LayoutOrder; sideLay.Parent=sidebar
     local sidePad=Instance.new("UIPadding"); sidePad.PaddingLeft=UDim.new(0,4); sidePad.PaddingTop=UDim.new(0,2); sidePad.Parent=sidebar
 
-    -- ===== Content =====
     local content=Instance.new("Frame"); content.Size=UDim2.new(1,-SIDE_W-7,1,-TITLE_H-7); content.Position=UDim2.new(0,SIDE_W+3,0,TITLE_H+3); content.BackgroundTransparency=1; content.Parent=root
 
     local tabs={}
@@ -1330,7 +1338,6 @@ local function buildGui()
     local miscTab    = newTab("Misc",5)
     local themeTab   = newTab("Theme",6)
 
-    -- ===== Dense components =====
     local function section(par,txt,ord)
         local f=Instance.new("Frame"); f.Size=UDim2.new(1,0,0,13); f.BackgroundTransparency=1; f.LayoutOrder=ord; f.Parent=par
         local l=Instance.new("TextLabel"); l.Size=UDim2.new(0,#txt*6+6,1,0); l.BackgroundTransparency=1; l.Text=string.upper(txt); l.TextColor3=PRIMARY; l.TextTransparency=0.1; l.Font=Enum.Font.GothamBold; l.TextSize=9; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=f
@@ -1431,7 +1438,6 @@ local function buildGui()
 
     local o=0; local function no() o=o+1; return o end
 
-    -- ============ MAIN ============
     local farmSwitch = toggleSwitch(mainTab,"AUTO FARM","Harvests currency · starts on execute",C.Farming,no(),function(s) if s then farm() else stopFarm() end end)
     toggleSwitch(mainTab,"Auto-launch on execute",nil,C.AutoLaunch,no(),function(s) C.AutoLaunch=s end)
 
@@ -1459,7 +1465,6 @@ local function buildGui()
     numInput(mainTab,"Aura radius",C.AuraRadius,5,25,no(),function(v) C.AuraRadius=v end)
     numInput(mainTab,"Bag threshold",C.Threshold,0,999,no(),function(v) C.Threshold=v end)
 
-    -- ============ COMBAT ============
     o=0
     section(combatTab,"Snap-Shot Engine",no())
     toggleSwitch(combatTab,"Auto Snap-Shot on full bag",nil,C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
@@ -1489,7 +1494,6 @@ local function buildGui()
     toggleSwitch(combatTab,"Reset when full",nil,C.ResetInnocent,no(),function(s) C.ResetInnocent=s end)
     toggleSwitch(combatTab,"Reset after action",nil,C.ResetAfterAction,no(),function(s) C.ResetAfterAction=s end)
 
-    -- ============ VISUALS (dense grid) ============
     o=0
     local PLAYER_FEATS={{"Box + Name","ESP"},{"Tracer","TR"},{"Chams","CH"},{"Outline","OL"},{"Glow","HL"},{"3D Box","BX"}}
     local OBJ_FEATS={{"3D Box","BX"},{"Chams","CH"},{"Outline","OL"},{"Glow","HL"}}
@@ -1506,16 +1510,14 @@ local function buildGui()
     section(visualsTab,"Dropped Guns",no())
     visualGrid(visualsTab,"Gun",OBJ_FEATS,no())
 
-    -- ============ SERVER ============
     o=0
     section(serverTab,"Realm Hop",no())
-    hint(serverTab,"Pool: 1-3 occupant realms (3 pages). Solo realms excluded when <=15 exist. Tries up to 5 realms, verifies each jump by survival, ends with an emergency random jump.",no(),26)
+    hint(serverTab,"Single teleport channel, no piled calls. Tries up to 3 realms with cooldown between each, then one random jump. If your runner blocks TeleportAsync it falls back to the legacy gate automatically.",no(),30)
     numInput(serverTab,"Auto-hop when players >",C.HopAt,0,50,no(),function(v) C.HopAt=v end)
     actionBtn(serverTab,"HOP NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
     local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,22); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.1; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=9; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,5)
     task.spawn(function() while hopLbl.Parent do task.wait(0.5); hopLbl.Text="  Status: "..(C.HopStatus~="" and C.HopStatus or "idle") end end)
 
-    -- ============ MISC ============
     o=0
     section(miscTab,"Protections",no())
     toggleSwitch(miscTab,"Anti-AFK",nil,C.AntiAFK,no(),function(s) C.AntiAFK=s; if s then startAFK() end end)
@@ -1531,7 +1533,6 @@ local function buildGui()
     cycleBtn(miscTab,"Vote mode",voteOpts,voteRev[C.VoteMode] or "OFF",no(),function(v) C.VoteMode=voteMap[v] or 0; if C.VoteMode~=0 then startVote() else stopVote() end end)
     numInput(miscTab,"Max votes (0 = inf)",C.VoteMax,0,99,no(),function(v) C.VoteMax=v end)
 
-    -- ============ THEME ============
     o=0
     section(themeTab,"GUI Scale",no())
     numInput(themeTab,"Scale (0.4 - 1.6)",C.GuiScale,0.4,1.6,no(),function(v) C.GuiScale=v; if uiScale then uiScale.Scale=v end end)
@@ -1574,7 +1575,6 @@ local function buildGui()
     end
     actionBtn(themeTab,"APPLY & REBUILD",PRIMARY,Color3.fromRGB(0,0,0),no(),function() buildGui() end)
 
-    -- ===== Window controls =====
     local collapsed=false
     winBtn(-50,"—",Color3.fromRGB(70,70,80),function()
         collapsed=not collapsed
@@ -1640,4 +1640,4 @@ task.spawn(function()
     end
 end)
 
-print("[Lambda] v0.43 ready | HWID: "..HWID)
+print("[Lambda] v0.44 ready | HWID: "..HWID)
