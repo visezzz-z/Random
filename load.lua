@@ -1,7 +1,7 @@
--- Lambda Hub | v0.44 | By kerli
--- Crash-Resistant Realm Hop | Single Teleport Channel | No Mixed Calls
+-- Lambda Hub | v0.45 | By kerli
+-- Velocity-Collision Fling | Queue-Clearing Realm Hop | Reason Surfacing
 
-print("[Lambda] v0.44 loading")
+print("[Lambda] v0.45 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -84,6 +84,15 @@ C.LastShot=0
 C.ShotsFired=0
 
 local function save() local t={} for k,_ in pairs(DEFAULTS) do t[k]=C[k] end prefsSave(t) end
+
+-- True while any kinetic displacement or snap-shot ritual is running.
+-- Anti-Fling and Noclip MUST stand down during these, otherwise they fight
+-- the very velocities and collisions the rituals depend on.
+local function isKineticBusy()
+    local s = C.FarmStatus
+    return s=="snap-shot" or s=="piercing" or s=="manual fling"
+        or s=="flinging murderer" or s=="flinging" or s=="fling done"
+end
 
 -- ============ COLORS ============
 local function parseHex(s)
@@ -191,7 +200,7 @@ local function startAntiFling()
     local lastP,lastT=nil,tick(); local lastC=nil
     RunService.Heartbeat:Connect(function()
         if not C.AntiFling then return end
-        if C.FarmStatus=="snap-shot" or C.FarmStatus=="piercing" or C.FarmStatus=="manual fling" then lastP=nil; return end
+        if isKineticBusy() then lastP=nil; return end
         local ch=LocalPlayer.Character
         if not ch then lastC=nil; lastP=nil; return end
         if ch~=lastC then lastC=ch; lastP=nil; lastT=tick(); return end
@@ -214,6 +223,7 @@ local function startNoclip()
     if noclipConn then noclipConn:Disconnect() end
     noclipConn=RunService.Stepped:Connect(function()
         if not C.Noclip then return end
+        if isKineticBusy() then return end -- collisions must stay ON during displacement
         local ch=LocalPlayer.Character; if not ch then return end
         for _,p in ipairs(ch:GetDescendants()) do if p:IsA("BasePart") and p.CanCollide then p.CanCollide=false end end
     end)
@@ -458,43 +468,84 @@ local function killAll()
     end
 end
 
--- ============ FLING ============
-local function flingTarget(targetPlayer)
+-- ============ FLING (Velocity-Collision Engine) ============
+-- The client owns its own body physics. Overlap the adversary's core and
+-- oscillate extreme velocity: each physics step the solver tries to separate
+-- the two assemblies and the separation impulse is transferred into THEIR
+-- assembly, launching them. Collisions must be enabled and our own Anti-Fling
+-- / Noclip must stand down while this runs (isKineticBusy).
+local FLING_POWER = 2600
+
+local function flingTarget(targetPlayer, returnHome)
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
     local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
     local tChar = targetPlayer and targetPlayer.Character
     local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-    if not (myRoot and myHum and tRoot) then return false end
-    myHum:ChangeState(Enum.HumanoidStateType.Physics)
+    if not (myRoot and myHum and tRoot and tRoot.Parent) then return false end
+
+    local backCF = myRoot.CFrame
+    local wasAnchored = myRoot.Anchored
+
     myRoot.Anchored = false
-    local bav = Instance.new("BodyAngularVelocity")
-    bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    bav.AngularVelocity = Vector3.new(0, 120, 0)
-    bav.Parent = myRoot
-    local startTime = tick()
-    local success = false
-    while tick() - startTime < 2.5 do
-        if not tRoot.Parent or not myRoot.Parent then break end
-        local tHum = tChar:FindFirstChildOfClass("Humanoid")
-        if tHum and tHum.Health <= 0 then success = true; break end
-        myRoot.CFrame = tRoot.CFrame * CFrame.Angles(math.rad(90), 0, 0)
-        myRoot.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
-        task.wait()
+    myHum.PlatformStand = true
+    pcall(function() myHum:ChangeState(Enum.HumanoidStateType.Physics) end)
+    for _, track in ipairs(myHum:GetPlayingAnimationTracks()) do
+        pcall(function() track:Stop(0) end)
     end
-    pcall(function() bav:Destroy() end)
-    if myRoot.Parent then myRoot.AssemblyLinearVelocity = Vector3.zero; myRoot.AssemblyAngularVelocity = Vector3.zero end
-    if myHum.Parent then myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+
+    -- Impulse transfer needs collisions ON
+    for _, p in ipairs(myChar:GetDescendants()) do
+        if p:IsA("BasePart") then p.CanCollide = true end
+    end
+
+    local success = false
+    local start = tick()
+    local flip = 1
+
+    while tick() - start < 2.4 do
+        tChar = targetPlayer.Character
+        tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+        local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+        if not myRoot.Parent then break end
+        if not (tRoot and tRoot.Parent) then break end
+        if tHum and tHum.Health <= 0 then success = true break end
+
+        myRoot.CFrame = tRoot.CFrame * CFrame.new(math.random(-2,2)*0.1, 0.3, math.random(-2,2)*0.1)
+        myRoot.AssemblyLinearVelocity = Vector3.new(600*flip, FLING_POWER*flip, -600*flip)
+        myRoot.AssemblyAngularVelocity = Vector3.zero
+        flip = -flip
+        RunService.Stepped:Wait()
+    end
+
+    if myRoot.Parent then
+        myRoot.AssemblyLinearVelocity = Vector3.zero
+        myRoot.AssemblyAngularVelocity = Vector3.zero
+        if returnHome then
+            myRoot.CFrame = backCF + Vector3.new(0, 4, 0)
+            myRoot.Anchored = wasAnchored
+        end
+    end
+    if returnHome and myHum.Parent then
+        myHum.PlatformStand = false
+        pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+    end
     return success
 end
+
 local function flingLoop(targetPlayer)
-    local deadline=tick()+12
-    while tick()<deadline do
-        local tChar=targetPlayer.Character; if not tChar then break end
-        local tHum=tChar:FindFirstChildOfClass("Humanoid"); if not tHum or tHum.Health<=0 then break end
-        flingTarget(targetPlayer)
-        task.wait(0.5)
+    C.FarmStatus = "flinging"
+    local deadline = tick() + 13
+    while tick() < deadline do
+        local tChar = targetPlayer.Character
+        if not tChar then break end
+        local tHum = tChar:FindFirstChildOfClass("Humanoid")
+        if not tHum or tHum.Health <= 0 then break end
+        local last = (tick() + 2.6) > deadline
+        flingTarget(targetPlayer, last)
+        if not last then task.wait(0.4) end
     end
+    C.FarmStatus = "fling done"
 end
 
 -- ============ SNAP-SHOT ENGINE ============
@@ -840,7 +891,14 @@ local function fullBag()
     local h=HRP(); if h then h.Anchored=false end
     local u=HUM(); if u then u.PlatformStand=false; u.AutoRotate=true end
     if r=="Innocent" then
-        if C.FlingMurderer then local m=findMurderer(); if m then C.FarmStatus="flinging murderer"; flingLoop(m); did=true end end
+        if C.FlingMurderer then
+            local m=findMurderer()
+            if m then
+                C.FarmStatus="flinging murderer"
+                flingLoop(m)
+                did=true
+            end
+        end
         if C.ResetInnocent then hardReset(); return end
         if did then return end
     elseif r=="Sheriff" or r=="Hero" then
@@ -876,7 +934,7 @@ task.spawn(function()
         if ch~=lastC then lastC=ch; C.MissCount=0; C.WasInRound=false end
         local h=ch and ch:FindFirstChild("HumanoidRootPart"); local u=ch and ch:FindFirstChildOfClass("Humanoid")
         if C.Farming and h and u then
-            local busy = C.FarmStatus=="snap-shot" or C.FarmStatus=="piercing" or C.FarmStatus=="manual fling"
+            local busy = isKineticBusy()
             if h.Position.Y<-150 and not busy then C.FarmStatus="fell"; hardReset(); C.Cooldown=tick()+3; C.MissCount=0; C.WasInRound=false; continue end
             local outside=isDeadOrOutOfRound()
             if not outside then C.WasInRound=true; C.MissCount=0
@@ -945,11 +1003,13 @@ local function stopFarm()
     cleanup()
 end
 
--- ============ CRASH-RESISTANT REALM HOP ============
--- One teleport channel only. No mixing of Teleport/TeleportAsync. No piled-up
--- calls. Each attempt is a single clean invocation; we wait for an explicit
--- TeleportInitFailed before retrying, and cool down between gates so the
--- teleport state fully settles. The final fallback rides the SAME channel.
+-- ============ REALM HOP (Queue-Clearing, Reason-Surfacing) ============
+-- Teleport calls can sit forever in the teleport queue (the round engine
+-- leaves entries there), which reads as "nothing happens". Every gate is now
+-- cleared before each invocation, async and legacy are chained per realm, and
+-- the rejection reason from TeleportInitFailed is surfaced in the status so
+-- failures stop being silent. A delayed safety net fires one clean random
+-- jump if a "successful" transition never actually happens.
 local HAS_TELEPORT_ASYNC = typeof(TeleportService.TeleportAsync) == "function"
 
 local function httpGet(u)
@@ -987,38 +1047,62 @@ local function collectServerCandidates()
     return cands
 end
 
-local function issueTeleport(serverId)
-    if HAS_TELEPORT_ASYNC then
-        return pcall(function()
-            local options = Instance.new("TeleportOptions")
-            if serverId then options.ServerInstanceId = serverId end
-            TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options)
-        end)
+local function clearQueue()
+    pcall(function() TeleportService:ClearTeleportQueue() end)
+end
+local function issueAsync(serverId)
+    return pcall(function()
+        local options = Instance.new("TeleportOptions")
+        if serverId then options.ServerInstanceId = serverId end
+        TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options)
+    end)
+end
+local function issueLegacy(serverId)
+    if serverId then
+        return pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer) end)
     else
-        if serverId then
-            return pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
-            end)
-        else
-            return pcall(function()
-                TeleportService:Teleport(game.PlaceId, LocalPlayer)
-            end)
-        end
+        return pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
     end
 end
-
 local function waitForTeleportResult(timeout)
     local failed = false
-    local conn = TeleportService.TeleportInitFailed:Connect(function(player)
-        if player == LocalPlayer then failed = true end
+    local reason = ""
+    local conn = TeleportService.TeleportInitFailed:Connect(function(player, result, message)
+        if player == LocalPlayer then
+            failed = true
+            reason = tostring(message or "")
+            if reason == "" then pcall(function() reason = tostring(result) end) end
+        end
     end)
     local elapsed = 0
     while elapsed < timeout and not failed do
-        task.wait(0.5)
-        elapsed = elapsed + 0.5
+        task.wait(0.4)
+        elapsed = elapsed + 0.4
     end
     pcall(function() conn:Disconnect() end)
-    return failed and "failed" or "likely_ok"
+    if failed then return "failed", reason end
+    return "likely_ok", ""
+end
+local function scheduleSafetyNet(delaySec)
+    task.delay(delaySec, function()
+        clearQueue()
+        issueLegacy(nil)
+    end)
+end
+local function tryServer(s)
+    if HAS_TELEPORT_ASYNC then
+        clearQueue(); task.wait(0.4)
+        issueAsync(s.id)
+        local result, reason = waitForTeleportResult(6)
+        if result == "likely_ok" then return "ok", "" end
+        C.HopStatus = "async rejected: " .. string.sub(reason or "?", 1, 34)
+        task.wait(1.2)
+    end
+    clearQueue(); task.wait(0.4)
+    issueLegacy(s.id)
+    local result2, reason2 = waitForTeleportResult(6)
+    if result2 == "likely_ok" then return "ok", "" end
+    return "failed", reason2
 end
 
 local function hop()
@@ -1035,37 +1119,46 @@ local function hop()
         end
         local pool = cands
         if #ones <= 15 and #others > 0 then pool = others end
-
         for i = #pool, 2, -1 do
             local j = math.random(i)
             pool[i], pool[j] = pool[j], pool[i]
         end
 
         local maxAttempts = math.min(#pool, 3)
-
         for i = 1, maxAttempts do
             if not C.IsHopping then return end
             C.HopStatus = string.format("hop %d/%d (%d inside)", i, maxAttempts, pool[i].playing)
-
-            issueTeleport(pool[i].id)
-            local result = waitForTeleportResult(6)
-
-            if result == "likely_ok" then
+            local status, reason = tryServer(pool[i])
+            if status == "ok" then
                 C.HopStatus = "transitioning..."
-                task.wait(4)
+                scheduleSafetyNet(18)
+                task.wait(5)
                 C.IsHopping = false
                 return
             end
-
-            C.HopStatus = "rejected, cooling down"
+            C.HopStatus = "blocked: " .. string.sub(tostring(reason or "?"), 1, 40)
             task.wait(2)
         end
 
         if not C.IsHopping then return end
         C.HopStatus = "random jump"
-        task.wait(1.5)
-        issueTeleport(nil)
-        task.wait(8)
+        clearQueue(); task.wait(0.8)
+        if HAS_TELEPORT_ASYNC then
+            issueAsync(nil)
+            local r, reason = waitForTeleportResult(8)
+            if r == "likely_ok" then
+                C.HopStatus = "transitioning..."
+                scheduleSafetyNet(18)
+                task.wait(4)
+                C.IsHopping = false
+                return
+            end
+            C.HopStatus = "random blocked: " .. string.sub(tostring(reason or "?"), 1, 34)
+            task.wait(1.5)
+        end
+        clearQueue(); task.wait(0.5)
+        issueLegacy(nil)
+        task.wait(6)
         C.IsHopping = false
     end)
 end
@@ -1292,7 +1385,7 @@ local function buildGui()
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,TITLE_H); titleBar.BackgroundTransparency=1; titleBar.Parent=root
     local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(9,9); dot.Position=UDim2.new(0,10,0.5,-4); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,5)
     local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,70,1,0); title.Position=UDim2.new(0,24,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
-    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.44"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
+    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.45"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
 
     local function winBtn(xOff, txt, bg, cb)
         local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(22,18); b.Position=UDim2.new(1,xOff,0.5,-9); b.BackgroundColor3=bg; b.BackgroundTransparency=0.35; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,4)
@@ -1483,6 +1576,7 @@ local function buildGui()
     toggleSwitch(combatTab,"Show FOV circle",nil,C.ShowFOV,no(),function(s) C.ShowFOV=s end)
 
     section(combatTab,"Fling & Roles",no())
+    hint(combatTab,"Velocity-collision displacement: overlaps the target and oscillates extreme velocity so the physics solver throws them. Pause Noclip if it misbehaves.",no(),22)
     toggleSwitch(combatTab,"Fling murderer on full bag",nil,C.FlingMurderer,no(),function(s) C.FlingMurderer=s end)
     playerDrop(combatTab,"Manual fling target",no(),function(p) C.FlingTarget=p end)
     actionBtn(combatTab,"FLING SELECTED TARGET",PRIMARY,Color3.fromRGB(0,0,0),no(),function()
@@ -1512,7 +1606,7 @@ local function buildGui()
 
     o=0
     section(serverTab,"Realm Hop",no())
-    hint(serverTab,"Single teleport channel, no piled calls. Tries up to 3 realms with cooldown between each, then one random jump. If your runner blocks TeleportAsync it falls back to the legacy gate automatically.",no(),30)
+    hint(serverTab,"Clears the teleport queue before each gate. Async then legacy per realm; rejection reasons are shown below. A hidden safety net fires one clean random jump if a transition stalls.",no(),32)
     numInput(serverTab,"Auto-hop when players >",C.HopAt,0,50,no(),function(v) C.HopAt=v end)
     actionBtn(serverTab,"HOP NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
     local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,22); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.1; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=9; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,5)
@@ -1524,7 +1618,7 @@ local function buildGui()
     toggleSwitch(miscTab,"Anti-Void",nil,C.AntiVoid,no(),function(s) C.AntiVoid=s; setupVoid() end)
     toggleSwitch(miscTab,"Anti-Fling",nil,C.AntiFling,no(),function(s) C.AntiFling=s end)
     toggleSwitch(miscTab,"Anti-Murderer",nil,C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
-    toggleSwitch(miscTab,"Noclip",nil,C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
+    toggleSwitch(miscTab,"Noclip","Pauses automatically during fling / snap-shot",C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
     toggleSwitch(miscTab,"Disable 3D rendering",nil,C.Disable3D,no(),function(s) C.Disable3D=s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
     section(miscTab,"Map Vote",no())
     local voteOpts={"OFF","Smallest Map","Largest Map","Random"}
@@ -1640,4 +1734,4 @@ task.spawn(function()
     end
 end)
 
-print("[Lambda] v0.44 ready | HWID: "..HWID)
+print("[Lambda] v0.45 ready | HWID: "..HWID)
