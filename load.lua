@@ -1,8 +1,7 @@
--- Lambda Hub | v0.40 | By kerli
--- Snap-Shot Engine (Mono-style ride-along) | Silent Aim + Prediction | Piercer
--- Modern GUI | Smart Realm Hop | Zero-Delay Harvest
+-- Lambda Hub | v0.41 | By kerli
+-- Mobile-Scalable GUI | Telemetry Stats | Snap-Shot Engine | Zero-Delay Harvest
 
-print("[Lambda] v0.40 loading")
+print("[Lambda] v0.41 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -48,17 +47,14 @@ local C = getgenv().LAMBDA
 
 local DEFAULTS = {
     Currency="Coin", Speed=35, FarmMode="Stealth", Depth=3, AuraRadius=12, CoinAura=true,
-    HopAt=6, AutoLaunch=true, AutoGrabGun=true,
+    HopAt=6, AutoLaunch=true, AutoGrabGun=true, GuiScale=1.0,
     Farming=false,
     AntiAFK=true, AntiVoid=true, AntiFling=true, Noclip=true, AntiMurderer=false,
     Disable3D=false, VoteMode=0, VoteMax=0,
     ResetInnocent=true, FlingMurderer=false, ShootSheriff=true, ResetAnyRole=false,
     KillMurderer=true, ResetMurderer=false, Threshold=50, ResetAfterAction=true,
-    -- Snap-Shot engine
     SnapHeight=5, AutoShootAttempts=3,
-    -- Silent aim / piercer
     SilentAim=false, Piercer=false, PredMode="Auto", ShootFOV=140, ShowFOV=false,
-    -- theme
     PrimaryColor="#FFC800", SecondaryColor="#15151C",
     Visuals_ESP_Murderer=false, Visuals_TR_Murderer=false, Visuals_CH_Murderer=false, Visuals_OL_Murderer=false, Visuals_HL_Murderer=false, Visuals_BX_Murderer=false,
     Visuals_ESP_Sheriff=false,  Visuals_TR_Sheriff=false,  Visuals_CH_Sheriff=false,  Visuals_OL_Sheriff=false,  Visuals_HL_Sheriff=false,  Visuals_BX_Sheriff=false,
@@ -72,6 +68,7 @@ local saved = prefsLoad()
 if saved then for k,v in pairs(saved) do if C[k]~=nil then C[k]=v end end end
 if C.Depth and C.Depth > 8 then C.Depth = 3 end
 if C.AuraRadius and C.AuraRadius < 5 then C.AuraRadius = 12 end
+C.GuiScale = math.clamp(tonumber(C.GuiScale) or 1.0, 0.4, 1.5)
 
 C.FarmThread=nil
 C.HopThread=nil; C.VoteThread=nil
@@ -461,7 +458,7 @@ local function killAll()
     end
 end
 
--- ============ FLING (Kinetic Spin Displacement) ============
+-- ============ FLING ============
 local function flingTarget(targetPlayer)
     local myChar = LocalPlayer.Character
     local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -469,18 +466,15 @@ local function flingTarget(targetPlayer)
     local tChar = targetPlayer and targetPlayer.Character
     local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
     if not (myRoot and myHum and tRoot) then return false end
-
     myHum:ChangeState(Enum.HumanoidStateType.Physics)
     myRoot.Anchored = false
-
     local bav = Instance.new("BodyAngularVelocity")
     bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
     bav.AngularVelocity = Vector3.new(0, 120, 0)
     bav.Parent = myRoot
-
     local startTime = tick()
     local success = false
-    while tick() - startTime < 2.5 and C.Farming do
+    while tick() - startTime < 2.5 do
         if not tRoot.Parent or not myRoot.Parent then break end
         local tHum = tChar:FindFirstChildOfClass("Humanoid")
         if tHum and tHum.Health <= 0 then success = true; break end
@@ -488,16 +482,11 @@ local function flingTarget(targetPlayer)
         myRoot.AssemblyLinearVelocity = Vector3.new(0, -50, 0)
         task.wait()
     end
-
     pcall(function() bav:Destroy() end)
-    if myRoot.Parent then
-        myRoot.AssemblyLinearVelocity = Vector3.zero
-        myRoot.AssemblyAngularVelocity = Vector3.zero
-    end
+    if myRoot.Parent then myRoot.AssemblyLinearVelocity = Vector3.zero; myRoot.AssemblyAngularVelocity = Vector3.zero end
     if myHum.Parent then myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end
     return success
 end
-
 local function flingLoop(targetPlayer)
     local deadline=tick()+12
     while tick()<deadline do
@@ -509,24 +498,15 @@ local function flingLoop(targetPlayer)
 end
 
 -- ============ SNAP-SHOT ENGINE ============
--- Mono-style: snap above target at fixed offset, ride along for frames so both
--- positions go stale together, fire point blank, return. Server accepts one
--- shot per ~3.2s and discards anything sooner.
 local SERVER_SHOT_CD = 3.25
-
 local function getPing()
     local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     return (ok and ping) or 100
 end
-
 local function pickHitPart(char)
     if not char then return nil end
-    return char:FindFirstChild("Head")
-        or char:FindFirstChild("UpperTorso")
-        or char:FindFirstChild("Torso")
-        or char:FindFirstChild("HumanoidRootPart")
+    return char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
 end
-
 local function predictPos(part)
     if not part then return nil end
     local base = part.Position
@@ -545,8 +525,6 @@ local function predictPos(part)
     t = math.clamp(t, 0, 0.5)
     return base + vel*t
 end
-
--- Remote discovery (adaptive, cached, capped)
 local shootRemotes = {}
 local lastScan = 0
 local function isShootRemoteName(n)
@@ -564,11 +542,8 @@ local function scanShootRemotes(force)
         for _, d in ipairs(children) do
             visited = visited + 1
             if visited > 1200 then return end
-            if d:IsA("RemoteEvent") and isShootRemoteName(d.Name) then
-                shootRemotes[d] = true
-            elseif depth < 4 and #d:GetChildren() > 0 then
-                scan(d, depth + 1)
-            end
+            if d:IsA("RemoteEvent") and isShootRemoteName(d.Name) then shootRemotes[d] = true
+            elseif depth < 4 and #d:GetChildren() > 0 then scan(d, depth + 1) end
         end
     end
     local gun = rawGunTool()
@@ -576,7 +551,6 @@ local function scanShootRemotes(force)
     local main = ReplicatedStorage:FindFirstChild("Main")
     pcall(function() scan(main or ReplicatedStorage, 0) end)
 end
-
 local remoteVerdicts = setmetatable({}, {__mode="k"})
 local function isShootRemote(r)
     local v = remoteVerdicts[r]
@@ -593,19 +567,14 @@ local function isShootRemote(r)
     remoteVerdicts[r] = v
     return v
 end
-
 local function isPlayerPart(v)
     local ok, res = pcall(function()
         local a = v.Parent
-        while a do
-            if Players:GetPlayerFromCharacter(a) then return true end
-            a = a.Parent
-        end
+        while a do if Players:GetPlayerFromCharacter(a) then return true end; a = a.Parent end
         return false
     end)
     return ok and res
 end
-
 local function closestAliveInFOV()
     local cam = workspace.CurrentCamera
     if not cam then return nil end
@@ -626,7 +595,6 @@ local function closestAliveInFOV()
     end
     return best
 end
-
 local function getSilentTarget()
     local r = role()
     if r == "Murderer" then
@@ -655,7 +623,6 @@ local function getSilentTarget()
     end
     return nil
 end
-
 local function rewriteArgs(args, n, target)
     local char = target.Character
     local part = pickHitPart(char)
@@ -682,10 +649,7 @@ local function rewriteArgs(args, n, target)
     for i = 1, n do
         local v = args[i]
         if type(v) == "table" then
-            for k, vv in pairs(v) do
-                local nv, ch = fix(vv)
-                if ch then v[k] = nv; changed = true end
-            end
+            for k, vv in pairs(v) do local nv, ch = fix(vv); if ch then v[k] = nv; changed = true end end
         else
             local nv, ch = fix(v)
             if ch then args[i] = nv; changed = true end
@@ -693,7 +657,6 @@ local function rewriteArgs(args, n, target)
     end
     return changed
 end
-
 local function fireRemotesAt(target)
     local char = target.Character
     local part = pickHitPart(char)
@@ -706,7 +669,6 @@ local function fireRemotesAt(target)
         end
     end
 end
-
 local function performShot(target, tryPierceFirst)
     local myChar = LocalPlayer.Character
     local hrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -718,10 +680,7 @@ local function performShot(target, tryPierceFirst)
     local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
     local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
     if not (tRoot and tHum) or tHum.Health <= 0 then return true end
-
     scanShootRemotes()
-
-    -- Pierce attempt: remote burst, no position snap (ignores geometry)
     if tryPierceFirst and C.Piercer then
         C.FarmStatus = "piercing"
         for i = 1, 2 do
@@ -734,20 +693,15 @@ local function performShot(target, tryPierceFirst)
         end
         task.wait(math.max(0, SERVER_SHOT_CD - (tick() - C.LastShot)))
     end
-
     if not tHum.Parent or tHum.Health <= 0 then return true end
-
-    -- Respect server shot cooldown before the snap
     local waitLeft = SERVER_SHOT_CD - (tick() - C.LastShot)
     if waitLeft > 0 then task.wait(waitLeft) end
-
     tChar = target.Character
     tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
     tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
     if not (tRoot and tHum) or tHum.Health <= 0 then return true end
     hrp = myChar:FindFirstChild("HumanoidRootPart")
     if not hrp or not hrp.Parent then return false end
-
     C.FarmStatus = "snap-shot"
     local cam = workspace.CurrentCamera
     local backCF = hrp.CFrame
@@ -755,18 +709,15 @@ local function performShot(target, tryPierceFirst)
     local backCamType = cam and cam.CameraType
     local wasAnchored = hrp.Anchored
     local wasCollide = hrp.CanCollide
-
     hrp.Anchored = false
     hrp.CanCollide = false
     hum.PlatformStand = false
     if cam then pcall(function() cam.CameraType = Enum.CameraType.Scriptable end) end
-
     local height = math.clamp(tonumber(C.SnapHeight) or 5, 3, 9)
     local fired = false
     local fireAt = tick() + 0.10
     local endAt = tick() + 1.6
     local killed = false
-
     while tick() < endAt do
         tChar = target.Character
         tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
@@ -774,19 +725,12 @@ local function performShot(target, tryPierceFirst)
         if not hrp.Parent then break end
         if not (tRoot and tHum) then killed = fired; break end
         if tHum.Health <= 0 or not tHum.Parent then killed = true; break end
-
-        -- Ride along: stay locked above the target, inherit their velocity,
-        -- so server-side both positions go stale together
         hrp.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, height, 0))
         hrp.AssemblyLinearVelocity = tRoot.AssemblyLinearVelocity
         hrp.AssemblyAngularVelocity = Vector3.zero
-
         local hitPart = pickHitPart(tChar)
         local aimPos = predictPos(hitPart) or tRoot.Position
-        if cam then
-            cam.CFrame = CFrame.lookAt(hrp.Position + Vector3.new(0, 1.2, 0), aimPos)
-        end
-
+        if cam then cam.CFrame = CFrame.lookAt(hrp.Position + Vector3.new(0, 1.2, 0), aimPos) end
         if not fired and tick() >= fireAt then
             fired = true
             C.LastShot = tick()
@@ -810,7 +754,6 @@ local function performShot(target, tryPierceFirst)
             end)
             task.spawn(function() fireRemotesAt(target) end)
         end
-
         if fired and tick() - C.LastShot > 0.45 then
             tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
             if not tHum or tHum.Health <= 0 then killed = true end
@@ -818,8 +761,6 @@ local function performShot(target, tryPierceFirst)
         end
         RunService.RenderStepped:Wait()
     end
-
-    -- Return home
     if hrp.Parent then
         hrp.CanCollide = wasCollide
         hrp.CFrame = backCF
@@ -836,7 +777,6 @@ local function performShot(target, tryPierceFirst)
     C.FarmStatus = fired and "shot fired" or "shot failed"
     return killed
 end
-
 local function shootMurdererAuto()
     local attempts = math.clamp(tonumber(C.AutoShootAttempts) or 3, 1, 6)
     for i = 1, attempts do
@@ -855,7 +795,6 @@ local function shootMurdererAuto()
     return not findMurderer()
 end
 
--- ============ METATABLE HOOKS (Silent Aim rewrite + Anti-Murderer) ============
 pcall(function()
     if not (getrawmetatable and setreadonly and newcclosure) then return end
     local mt = getrawmetatable(game)
@@ -880,10 +819,7 @@ pcall(function()
             local hum = HUM()
             if hum and self == hum then
                 if method == "TakeDamage" then return 0 end
-                if method == "ChangeState" then
-                    local a = {...}
-                    if a[1] == Enum.HumanoidStateType.Dead then return nil end
-                end
+                if method == "ChangeState" then local a = {...}; if a[1] == Enum.HumanoidStateType.Dead then return nil end end
             end
         end
         return oldNC(self, ...)
@@ -891,9 +827,7 @@ pcall(function()
     mt.__newindex = newcclosure(function(self, key, value)
         if C.AntiMurderer and not C.IntentionalReset then
             local hum = HUM()
-            if hum and self == hum and key == "Health" and value <= 0 then
-                if murdererNearby() then return end
-            end
+            if hum and self == hum and key == "Health" and value <= 0 then if murdererNearby() then return end end
         end
         return oldNI(self, key, value)
     end)
@@ -905,29 +839,16 @@ local function fullBag()
     local r=role(); local did=false
     local h=HRP(); if h then h.Anchored=false end
     local u=HUM(); if u then u.PlatformStand=false; u.AutoRotate=true end
-
     if r=="Innocent" then
-        if C.FlingMurderer then
-            local m=findMurderer()
-            if m then
-                C.FarmStatus="flinging murderer"
-                flingLoop(m)
-                did=true
-            end
-        end
+        if C.FlingMurderer then local m=findMurderer(); if m then C.FarmStatus="flinging murderer"; flingLoop(m); did=true end end
         if C.ResetInnocent then hardReset(); return end
         if did then return end
     elseif r=="Sheriff" or r=="Hero" then
-        if C.ShootSheriff then
-            C.FarmStatus="snap-shot engine"
-            shootMurdererAuto()
-            did=true
-        end
+        if C.ShootSheriff then C.FarmStatus="snap-shot engine"; shootMurdererAuto(); did=true end
     elseif r=="Murderer" then
         if C.KillMurderer then killAll(); did=true end
         if C.ResetMurderer and not did then hardReset(); return end
     end
-
     if did and C.ResetAfterAction then task.wait(1.5); hardReset(); return end
     if C.ResetAnyRole then hardReset() end
 end
@@ -974,25 +895,18 @@ local function farmLoopFn()
         if not u or u.Health<=0 or not h then C.FarmStatus="no char"; task.wait(0.3); continue end
         if u:GetState()==Enum.HumanoidStateType.Dead then C.FarmStatus="dead state"; cleanup(); task.wait(0.3); continue end
         if isDeadOrOutOfRound() then C.FarmStatus="dead/lobby"; cleanup(); task.wait(0.3); continue end
-
         if C.AutoGrabGun and role()=="Sheriff" then
             if not rawGunTool() and findGunDropPart() then grabGun(); task.wait(0.3) end
         end
-
         local coin=nearestCoin()
         if coin then
-            -- ZERO DELAY: hook destruction the instant we target it
             task.spawn(function()
                 local conn
                 conn = coin.AncestryChanged:Connect(function()
-                    if not coin.Parent then
-                        removeCoinFromCache(coin)
-                        if conn.Connected then conn:Disconnect() end
-                    end
+                    if not coin.Parent then removeCoinFromCache(coin); if conn.Connected then conn:Disconnect() end end
                 end)
                 task.delay(4, function() if conn and conn.Connected then conn:Disconnect() end end)
             end)
-
             local got=false
             if C.FarmMode=="Stealth" then
                 C.FarmStatus=C.CoinAura and "stealth+aura" or "stealth"
@@ -1007,19 +921,12 @@ local function farmLoopFn()
                 if not h.Anchored then h.Anchored=true; u.PlatformStand=true; u.AutoRotate=false end
                 got=collectNormal(coin,false)
             end
-
-            if got then
-                C.CollectFails=0
-                removeCoinFromCache(coin)
-            elseif coin.Parent then
-                blacklist(coin); C.CollectFails=C.CollectFails+1
-            else
-                C.CollectFails=0
-            end
+            if got then C.CollectFails=0; removeCoinFromCache(coin)
+            elseif coin.Parent then blacklist(coin); C.CollectFails=C.CollectFails+1
+            else C.CollectFails=0 end
             coinCache.ts = 0
             task.wait(0.01)
         else C.FarmStatus="no coins"; cleanup(); task.wait(0.3) end
-
         local st=statValue()
         if st and st>=threshold() and tick()-C.LastFull>3 then C.LastFull=tick(); C.FarmStatus="full bag"; fullBag() end
     end
@@ -1027,7 +934,6 @@ local function farmLoopFn()
     C.Farming=false
     C.FarmThread=nil
 end
-
 local function farm()
     if C.FarmThread then return end
     C.Farming=true; C.FarmStatus="starting"
@@ -1049,7 +955,6 @@ local function httpGet(u)
     end)
     return (success and type(result)=="string" and #result>0) and result or nil
 end
-
 local function fetchServerPage(cursor)
     local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
     if cursor and cursor ~= "" then url = url .. "&cursor=" .. HttpService:UrlEncode(cursor) end
@@ -1059,7 +964,6 @@ local function fetchServerPage(cursor)
     if not ok or type(res) ~= "table" then return nil end
     return res
 end
-
 local function collectServerCandidates()
     local cands = {}
     local cursor = nil
@@ -1067,11 +971,7 @@ local function collectServerCandidates()
         local res = fetchServerPage(cursor)
         if not res or type(res.data) ~= "table" then break end
         for _, s in ipairs(res.data) do
-            if type(s)=="table" and s.id and s.id ~= game.JobId
-                and type(s.playing)=="number" and type(s.maxPlayers)=="number"
-                and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then
-                table.insert(cands, s)
-            end
+            if type(s)=="table" and s.id and s.id ~= game.JobId and type(s.playing)=="number" and type(s.maxPlayers)=="number" and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then table.insert(cands, s) end
         end
         cursor = res.nextPageCursor
         if not cursor or cursor == "" then break end
@@ -1080,42 +980,28 @@ local function collectServerCandidates()
     end
     return cands
 end
-
 local function pickServerId()
     local cands = collectServerCandidates()
     if #cands == 0 then return nil, 0, 0 end
     local ones, others = {}, {}
-    for _, s in ipairs(cands) do
-        if s.playing == 1 then table.insert(ones, s) else table.insert(others, s) end
-    end
+    for _, s in ipairs(cands) do if s.playing == 1 then table.insert(ones, s) else table.insert(others, s) end end
     local pool = cands
-    -- If there are <=15 solo-occupied servers, exclude them so they don't get
-    -- flooded and filled instantly; prefer servers that already have company.
-    if #ones <= 15 and #others > 0 then
-        pool = others
-    end
+    if #ones <= 15 and #others > 0 then pool = others end
     local pick = pool[math.random(1, #pool)]
     return pick and pick.id or nil, #ones, #cands
 end
-
 local function hop()
     if C.IsHopping then return end
     C.IsHopping = true; C.IsTeleporting = true; C.HopStatus = "scanning realms"
     task.spawn(function()
         local ok, id, ones, total = pcall(pickServerId)
-        if not ok then
-            C.HopStatus = "scan error"
-            task.wait(2); C.IsHopping = false; C.IsTeleporting = false
-            return
-        end
+        if not ok then C.HopStatus = "scan error"; task.wait(2); C.IsHopping = false; C.IsTeleporting = false; return end
         if id then
             C.HopStatus = string.format("joining %s (%d solo / %d found)", tostring(id):sub(1,8), ones or 0, total or 0)
             local options = Instance.new("TeleportOptions")
             options.ServerInstanceId = id
             local tp = pcall(function() TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, options) end)
-            if not tp then
-                pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer) end)
-            end
+            if not tp then pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer) end) end
         else
             C.HopStatus = "no realm found, fallback"
             pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
@@ -1128,12 +1014,7 @@ end
 local function hopNow() if C.IsHopping then return end hop() end
 local function hopMonitor()
     if C.HopThread then return end
-    C.HopThread = task.spawn(function()
-        while C.HopAt > 0 do
-            task.wait(5)
-            if not C.IsHopping and #Players:GetPlayers() > C.HopAt then hop(); break end
-        end
-    end)
+    C.HopThread = task.spawn(function() while C.HopAt > 0 do task.wait(5); if not C.IsHopping and #Players:GetPlayers() > C.HopAt then hop(); break end end end)
 end
 
 -- ============ AUTO-VOTE ============
@@ -1211,30 +1092,14 @@ local function rebuildVisualCache()
     anyGun=visOn("Gun","CH") or visOn("Gun","OL") or visOn("Gun","HL") or visOn("Gun","BX")
 end
 rebuildVisualCache()
-
 RunService.RenderStepped:Connect(function()
-    -- FOV circle
     if hasDrawing then
         if C.ShowFOV then
-            if not fovCircle then
-                fovCircle = Drawing.new("Circle")
-                fovCircle.Thickness = 1.5
-                fovCircle.Filled = false
-                fovCircle.NumSides = 48
-            end
+            if not fovCircle then fovCircle = Drawing.new("Circle"); fovCircle.Thickness = 1.5; fovCircle.Filled = false; fovCircle.NumSides = 48 end
             local cam0 = workspace.CurrentCamera
-            if cam0 then
-                fovCircle.Position = cam0.ViewportSize / 2
-                fovCircle.Radius = math.max(10, C.ShootFOV)
-                fovCircle.Color = PRIMARY
-                fovCircle.Transparency = 0.85
-                fovCircle.Visible = true
-            end
-        elseif fovCircle then
-            fovCircle.Visible = false
-        end
+            if cam0 then fovCircle.Position = cam0.ViewportSize / 2; fovCircle.Radius = math.max(10, C.ShootFOV); fovCircle.Color = PRIMARY; fovCircle.Transparency = 0.85; fovCircle.Visible = true end
+        elseif fovCircle then fovCircle.Visible = false end
     end
-
     if not hasDrawing then return end
     if not anyPlayerDrawing then for _,t in pairs(ESP.draws) do hideAll(t) end return end
     local cam=workspace.CurrentCamera; if not cam then return end
@@ -1260,7 +1125,6 @@ RunService.RenderStepped:Connect(function()
         if wantTR and t.tracer then t.tracer.From=origin; t.tracer.To=s.tracerTo; t.tracer.Color=col; t.tracer.Visible=true elseif t.tracer then t.tracer.Visible=false end
     end
 end)
-
 local hlAccum=0
 RunService.Heartbeat:Connect(function(dt)
     if not (anyHighlight or anyCoin or anyGun) then return end
@@ -1300,7 +1164,6 @@ RunService.Heartbeat:Connect(function(dt)
         for p,bx in pairs(ESP.gunBX) do if not seen[p] or not p.Parent then pcall(function() bx:Destroy() end); ESP.gunBX[p]=nil end end
     else for _,hl in pairs(ESP.gunHL) do pcall(function() hl:Destroy() end) end; for _,bx in pairs(ESP.gunBX) do pcall(function() bx:Destroy() end) end; ESP.gunHL={}; ESP.gunBX={} end
 end)
-
 Players.PlayerRemoving:Connect(function(p)
     if ESP.draws[p] then for _,d in pairs(ESP.draws[p]) do pcall(function() d:Remove() end) end; ESP.draws[p]=nil end
     if ESP.smooth[p] then ESP.smooth[p]=nil end
@@ -1308,7 +1171,7 @@ Players.PlayerRemoving:Connect(function(p)
     if ESP.sboxes[p] then pcall(function() ESP.sboxes[p]:Destroy() end); ESP.sboxes[p]=nil end
 end)
 
--- ============ GUI (Modern Overhaul) ============
+-- ============ SCALABLE MODERN GUI ============
 local function guiParent()
     do local ok,r=pcall(function() return gethui() end); if ok and r then return r end end
     do local ok,r=pcall(function() return game:GetService("CoreGui") end); if ok and r then return r end end
@@ -1326,84 +1189,81 @@ local THEMES={
     {name="Cyber",p=Color3.fromRGB(255,0,180),s=Color3.fromRGB(14,14,32)},
     {name="Mono",p=Color3.fromRGB(220,220,220),s=Color3.fromRGB(20,20,20)},
 }
-
 local function corner(o,r) local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 8); c.Parent=o; return c end
 local function strokeOf(o,col,th,tr)
     local s=Instance.new("UIStroke"); s.Color=col or Color3.fromRGB(255,255,255); s.Thickness=th or 1; s.Transparency=tr or 0.75
     s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=o; return s
 end
-
 local FAST_TWEEN = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 local function buildGui()
     if MAIN_GUI then pcall(function() MAIN_GUI:Destroy() end) end
     local parent=guiParent(); if not parent then return nil end
-
     local gui=Instance.new("ScreenGui"); gui.Name="LambdaHub"; gui.ResetOnSpawn=false; gui.IgnoreGuiInset=true; gui.DisplayOrder=999999
     pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
     gui.Parent=parent; MAIN_GUI=gui
 
-    local ROOT_W, ROOT_H = 480, 545
-    local TITLE_H, SIDE_W, MIN_STATS_H = 36, 94, 60
+    local ROOT_W, ROOT_H = 420, 500
+    local TITLE_H, SIDE_W, MIN_STATS_H = 38, 90, 70
 
     local root=Instance.new("Frame")
     root.Size=UDim2.fromOffset(ROOT_W,ROOT_H)
-    root.Position=UDim2.new(0.5,-ROOT_W/2,0.5,-ROOT_H/2)
+    root.AnchorPoint=Vector2.new(0.5,0.5)
+    root.Position=UDim2.fromScale(0.5,0.5)
     root.BackgroundColor3=SECONDARY
-    root.BackgroundTransparency=0.04
+    root.BackgroundTransparency=0.02
     root.BorderSizePixel=0
     root.Active=true; root.Draggable=true
     root.Parent=gui
-    corner(root,12)
-    strokeOf(root,PRIMARY,1,0.82)
+    corner(root,14)
+    strokeOf(root,PRIMARY,1.5,0.6)
 
-    -- subtle top glow gradient
-    local rootGrad=Instance.new("UIGradient")
-    rootGrad.Rotation=90
-    rootGrad.Color=ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(255,255,255)),
-        ColorSequenceKeypoint.new(0.25, Color3.fromRGB(190,190,190)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(160,160,160)),
-    })
-    rootGrad.Transparency=NumberSequence.new({
-        NumberSequenceKeypoint.new(0,0),
-        NumberSequenceKeypoint.new(1,0.15),
-    })
-    rootGrad.Parent=root
+    -- UI SCALE for Mobile / Desktop compatibility
+    local uiScale = Instance.new("UIScale")
+    uiScale.Parent = root
+    uiScale.Scale = C.GuiScale
+    local function updateScale()
+        local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+        local autoScale = math.clamp(vp.Y / 850, 0.45, 1.1)
+        if UIS.TouchEnabled then autoScale = math.min(autoScale, 0.8) end
+        -- Only auto-scale if user hasn't manually set it recently, or just apply user setting
+        uiScale.Scale = C.GuiScale
+    end
+    updateScale()
 
     -- ===== Title bar =====
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,TITLE_H); titleBar.BackgroundTransparency=1; titleBar.Parent=root
-    local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(10,10); dot.Position=UDim2.new(0,14,0.5,-5); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,5)
-    local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,180,1,0); title.Position=UDim2.new(0,32,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=15; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
-    local verChip=Instance.new("Frame"); verChip.Size=UDim2.fromOffset(40,16); verChip.Position=UDim2.new(0,110,0.5,-8); verChip.BackgroundColor3=PRIMARY; verChip.BackgroundTransparency=0.75; verChip.BorderSizePixel=0; verChip.Parent=titleBar; corner(verChip,4)
-    local verTxt=Instance.new("TextLabel"); verTxt.Size=UDim2.scale(1,0); verTxt.BackgroundTransparency=1; verTxt.Text="v0.40"; verTxt.TextColor3=PRIMARY; verTxt.Font=Enum.Font.GothamBold; verTxt.TextSize=9; verTxt.Parent=verChip
+    local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(12,12); dot.Position=UDim2.new(0,14,0.5,-6); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,6)
+    local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,120,1,0); title.Position=UDim2.new(0,34,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=16; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
+    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,50,1,0); ver.Position=UDim2.new(0,105,0,0); ver.BackgroundTransparency=1; ver.Text="v0.41"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=12; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.TextTransparency=0.1; ver.Parent=titleBar
 
     local function winBtn(xOff, txt, bg, cb)
-        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(26,22); b.Position=UDim2.new(1,xOff,0.5,-11); b.BackgroundColor3=bg; b.BackgroundTransparency=0.35; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=12; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,6)
+        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(28,24); b.Position=UDim2.new(1,xOff,0.5,-12); b.BackgroundColor3=bg; b.BackgroundTransparency=0.4; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=14; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,6)
         b.MouseEnter:Connect(function() TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.05}):Play() end)
-        b.MouseLeave:Connect(function() TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.35}):Play() end)
+        b.MouseLeave:Connect(function() TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.4}):Play() end)
         b.MouseButton1Click:Connect(cb)
         return b
     end
 
-    -- ===== Minimized stats bar =====
-    local minBar=Instance.new("Frame"); minBar.Size=UDim2.new(1,-16,0,MIN_STATS_H); minBar.Position=UDim2.new(0,8,0,TITLE_H); minBar.BackgroundColor3=INSET; minBar.BackgroundTransparency=0.15; minBar.BorderSizePixel=0; minBar.Visible=false; minBar.Parent=root; corner(minBar,8)
-    local minStats=Instance.new("TextLabel"); minStats.Size=UDim2.new(1,-12,1,0); minStats.Position=UDim2.new(0,6,0,0); minStats.BackgroundTransparency=1; minStats.TextColor3=PRIMARY; minStats.Font=Enum.Font.Code; minStats.TextSize=11; minStats.TextXAlignment=Enum.TextXAlignment.Left; minStats.TextYAlignment=Enum.TextYAlignment.Center; minStats.TextWrapped=true; minStats.Text=""; minStats.Parent=minBar
+    -- ===== Minimized Stats Bar =====
+    local minBar=Instance.new("Frame"); minBar.Size=UDim2.new(1,-16,0,MIN_STATS_H); minBar.Position=UDim2.new(0,8,0,TITLE_H); minBar.BackgroundColor3=INSET; minBar.BackgroundTransparency=0.1; minBar.BorderSizePixel=0; minBar.Visible=false; minBar.Parent=root; corner(minBar,10)
+    strokeOf(minBar, PRIMARY, 1, 0.8)
+    local minStats=Instance.new("TextLabel"); minStats.Size=UDim2.new(1,-16,1,-8); minStats.Position=UDim2.new(0,8,0,4); minStats.BackgroundTransparency=1; minStats.TextColor3=PRIMARY; minStats.Font=Enum.Font.Code; minStats.TextSize=12; minStats.TextXAlignment=Enum.TextXAlignment.Left; minStats.TextYAlignment=Enum.TextYAlignment.Top; minStats.TextWrapped=true; minStats.Text=""; minStats.Parent=minBar
 
     -- ===== Sidebar =====
     local sidebar=Instance.new("Frame"); sidebar.Size=UDim2.new(0,SIDE_W,1,-TITLE_H-8); sidebar.Position=UDim2.new(0,0,0,TITLE_H+4); sidebar.BackgroundTransparency=1; sidebar.Parent=root
     local sideLay=Instance.new("UIListLayout"); sideLay.Padding=UDim.new(0,4); sideLay.SortOrder=Enum.SortOrder.LayoutOrder; sideLay.Parent=sidebar
-    local sidePad=Instance.new("UIPadding"); sidePad.PaddingLeft=UDim.new(0,8); sidePad.PaddingTop=UDim.new(0,4); sidePad.Parent=sidebar
+    local sidePad=Instance.new("UIPadding"); sidePad.PaddingLeft=UDim.new(0,6); sidePad.PaddingTop=UDim.new(0,4); sidePad.Parent=sidebar
 
     -- ===== Content =====
-    local content=Instance.new("Frame"); content.Size=UDim2.new(1,-SIDE_W-14,1,-TITLE_H-12); content.Position=UDim2.new(0,SIDE_W+6,0,TITLE_H+6); content.BackgroundTransparency=1; content.Parent=root
+    local content=Instance.new("Frame"); content.Size=UDim2.new(1,-SIDE_W-12,1,-TITLE_H-12); content.Position=UDim2.new(0,SIDE_W+4,0,TITLE_H+6); content.BackgroundTransparency=1; content.Parent=root
 
     local tabs={}
     local function newTab(name, ord)
-        local b=Instance.new("TextButton"); b.Size=UDim2.new(1,-8,0,32); b.BackgroundColor3=PRIMARY; b.BackgroundTransparency=1; b.Text=name; b.TextColor3=TEXT_DIM; b.Font=Enum.Font.GothamMedium; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.LayoutOrder=ord; b.Parent=sidebar; corner(b,8)
+        local b=Instance.new("TextButton"); b.Size=UDim2.new(1,-6,0,32); b.BackgroundColor3=PRIMARY; b.BackgroundTransparency=1; b.Text=name; b.TextColor3=TEXT_DIM; b.Font=Enum.Font.GothamMedium; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.LayoutOrder=ord; b.Parent=sidebar; corner(b,8)
         local f=Instance.new("ScrollingFrame"); f.Size=UDim2.new(1,0,1,0); f.BackgroundTransparency=1; f.BorderSizePixel=0; f.ScrollBarThickness=3; f.ScrollBarImageColor3=PRIMARY; f.ScrollBarImageTransparency=0.5; f.CanvasSize=UDim2.new(0,0,0,0); f.Visible=false; f.Parent=content
         local l=Instance.new("UIListLayout"); l.Padding=UDim.new(0,5); l.SortOrder=Enum.SortOrder.LayoutOrder; l.Parent=f
-        local p=Instance.new("UIPadding"); p.PaddingTop=UDim.new(0,6); p.PaddingLeft=UDim.new(0,4); p.PaddingRight=UDim.new(0,8); p.PaddingBottom=UDim.new(0,10); p.Parent=f
+        local p=Instance.new("UIPadding"); p.PaddingTop=UDim.new(0,4); p.PaddingLeft=UDim.new(0,4); p.PaddingRight=UDim.new(0,8); p.PaddingBottom=UDim.new(0,10); p.Parent=f
         l:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function() f.CanvasSize=UDim2.new(0,0,0,l.AbsoluteContentSize.Y+18) end)
         tabs[name]={btn=b,frame=f,list=l}
         b.MouseButton1Click:Connect(function()
@@ -1413,7 +1273,7 @@ local function buildGui()
                 t.btn.TextColor3=TEXT_DIM
             end
             f.Visible=true
-            TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.86}):Play()
+            TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.85}):Play()
             b.TextColor3=PRIMARY
         end)
         return f
@@ -1426,87 +1286,72 @@ local function buildGui()
     local miscTab    = newTab("Misc",5)
     local themeTab   = newTab("Theme",6)
 
-    -- ===== Components =====
     local function section(par,txt,ord)
-        local f=Instance.new("Frame"); f.Size=UDim2.new(1,0,0,20); f.BackgroundTransparency=1; f.LayoutOrder=ord; f.Parent=par
+        local f=Instance.new("Frame"); f.Size=UDim2.new(1,0,0,18); f.BackgroundTransparency=1; f.LayoutOrder=ord; f.Parent=par
         local l=Instance.new("TextLabel"); l.Size=UDim2.new(0,#txt*7+8,1,0); l.BackgroundTransparency=1; l.Text=string.upper(txt); l.TextColor3=PRIMARY; l.TextTransparency=0.15; l.Font=Enum.Font.GothamBold; l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=f
         local line=Instance.new("Frame"); line.Size=UDim2.new(1,-(#txt*7+16),0,1); line.Position=UDim2.new(0,#txt*7+12,0.5,0); line.BackgroundColor3=Color3.fromRGB(255,255,255); line.BackgroundTransparency=0.88; line.BorderSizePixel=0; line.Parent=f
         return f
     end
-
     local function toggleSwitch(par,txt,desc,init,ord,cb)
-        local hgt = desc and 44 or 30
+        local hgt = desc and 42 or 28
         local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,hgt); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel"); l.BackgroundTransparency=1; l.Text=txt; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.GothamMedium; l.TextSize=12; l.TextXAlignment=Enum.TextXAlignment.Left; l.TextTruncate=Enum.TextTruncate.AtEnd
+        local l=Instance.new("TextLabel"); l.BackgroundTransparency=1; l.Text=txt; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.GothamMedium; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.TextTruncate=Enum.TextTruncate.AtEnd
         if desc then
-            l.Size=UDim2.new(1,-62,0,16); l.Position=UDim2.new(0,2,0,4)
-            local d=Instance.new("TextLabel"); d.Size=UDim2.new(1,-62,0,16); d.Position=UDim2.new(0,2,0,23); d.BackgroundTransparency=1; d.Text=desc; d.TextColor3=TEXT_DIM; d.Font=Enum.Font.Gotham; d.TextSize=9; d.TextXAlignment=Enum.TextXAlignment.Left; d.TextTruncate=Enum.TextTruncate.AtEnd; d.Parent=row
+            l.Size=UDim2.new(1,-56,0,14); l.Position=UDim2.new(0,2,0,3)
+            local d=Instance.new("TextLabel"); d.Size=UDim2.new(1,-56,0,14); d.Position=UDim2.new(0,2,0,20); d.BackgroundTransparency=1; d.Text=desc; d.TextColor3=TEXT_DIM; d.Font=Enum.Font.Gotham; d.TextSize=9; d.TextXAlignment=Enum.TextXAlignment.Left; d.TextTruncate=Enum.TextTruncate.AtEnd; d.Parent=row
         else
-            l.Size=UDim2.new(1,-62,1,0); l.Position=UDim2.new(0,2,0,0)
+            l.Size=UDim2.new(1,-56,1,0); l.Position=UDim2.new(0,2,0,0)
         end
         l.Parent=row
-        local track=Instance.new("TextButton"); track.Size=UDim2.fromOffset(42,22); track.Position=UDim2.new(1,-48,0.5,-11); track.BackgroundColor3=init and PRIMARY or Color3.fromRGB(48,48,56); track.BorderSizePixel=0; track.Text=""; track.AutoButtonColor=false; track.Parent=row; corner(track,11)
-        local knob=Instance.new("Frame"); knob.Size=UDim2.fromOffset(16,16); knob.BackgroundColor3=init and Color3.fromRGB(18,18,22) or Color3.fromRGB(235,235,240); knob.BorderSizePixel=0; knob.Position=init and UDim2.new(1,-19,0.5,-8) or UDim2.new(0,3,0.5,-8); knob.Parent=track; corner(knob,8)
+        local track=Instance.new("TextButton"); track.Size=UDim2.fromOffset(38,20); track.Position=UDim2.new(1,-44,0.5,-10); track.BackgroundColor3=init and PRIMARY or Color3.fromRGB(48,48,56); track.BorderSizePixel=0; track.Text=""; track.AutoButtonColor=false; track.Parent=row; corner(track,10)
+        local knob=Instance.new("Frame"); knob.Size=UDim2.fromOffset(14,14); knob.BackgroundColor3=init and Color3.fromRGB(18,18,22) or Color3.fromRGB(235,235,240); knob.BorderSizePixel=0; knob.Position=init and UDim2.new(1,-17,0.5,-7) or UDim2.new(0,3,0.5,-7); knob.Parent=track; corner(knob,7)
         local st=init
         local function apply(s,instant)
             st=s
             local ti=instant and TweenInfo.new(0) or FAST_TWEEN
             TweenService:Create(track,ti,{BackgroundColor3=s and PRIMARY or Color3.fromRGB(48,48,56)}):Play()
-            TweenService:Create(knob,ti,{Position=s and UDim2.new(1,-19,0.5,-8) or UDim2.new(0,3,0.5,-8), BackgroundColor3=s and Color3.fromRGB(18,18,22) or Color3.fromRGB(235,235,240)}):Play()
+            TweenService:Create(knob,ti,{Position=s and UDim2.new(1,-17,0.5,-7) or UDim2.new(0,3,0.5,-7), BackgroundColor3=s and Color3.fromRGB(18,18,22) or Color3.fromRGB(235,235,240)}):Play()
         end
         track.MouseButton1Click:Connect(function() apply(not st); pcall(function() cb(st) end); save() end)
         return {set=function(s) apply(s,true) end, row=row}
     end
-
     local function numInput(par,label,val,minV,maxV,ord,cb)
-        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,28); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-84,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
-        local box=Instance.new("TextBox"); box.Size=UDim2.fromOffset(74,22); box.Position=UDim2.new(1,-78,0.5,-11); box.BackgroundColor3=INSET; box.BorderSizePixel=0; box.Text=tostring(val); box.PlaceholderText="value"; box.TextColor3=PRIMARY; box.PlaceholderColor3=TEXT_DIM; box.Font=Enum.Font.GothamMedium; box.TextSize=11; box.ClearTextOnFocus=false; box.Parent=row; corner(box,6); strokeOf(box,Color3.fromRGB(255,255,255),1,0.9)
+        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-76,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
+        local box=Instance.new("TextBox"); box.Size=UDim2.fromOffset(68,20); box.Position=UDim2.new(1,-72,0.5,-10); box.BackgroundColor3=INSET; box.BorderSizePixel=0; box.Text=tostring(val); box.PlaceholderText="val"; box.TextColor3=PRIMARY; box.PlaceholderColor3=TEXT_DIM; box.Font=Enum.Font.GothamMedium; box.TextSize=11; box.ClearTextOnFocus=false; box.Parent=row; corner(box,6); strokeOf(box,Color3.fromRGB(255,255,255),1,0.9)
         box.FocusLost:Connect(function()
             local n=tonumber(box.Text)
-            if n then
-                if minV then n=math.clamp(n,minV,maxV) end
-                pcall(function() cb(n) end)
-                box.Text=tostring(n)
-            else
-                box.Text=tostring(val)
-            end
+            if n then if minV then n=math.clamp(n,minV,maxV) end; pcall(function() cb(n) end); box.Text=tostring(n) else box.Text=tostring(val) end
             save()
         end)
         return row
     end
-
     local function cycleBtn(par,label,opts,init,ord,cb)
-        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,28); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-138,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
-        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(128,22); b.Position=UDim2.new(1,-132,0.5,-11); b.BackgroundColor3=INSET; b.BorderSizePixel=0; b.TextColor3=PRIMARY; b.Font=Enum.Font.GothamMedium; b.TextSize=10; b.AutoButtonColor=false; b.Parent=row; corner(b,6); strokeOf(b,Color3.fromRGB(255,255,255),1,0.9)
+        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-126,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
+        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(116,20); b.Position=UDim2.new(1,-120,0.5,-10); b.BackgroundColor3=INSET; b.BorderSizePixel=0; b.TextColor3=PRIMARY; b.Font=Enum.Font.GothamMedium; b.TextSize=10; b.AutoButtonColor=false; b.Parent=row; corner(b,6); strokeOf(b,Color3.fromRGB(255,255,255),1,0.9)
         local i=findIdx(opts,init); b.Text=tostring(opts[i])
         b.MouseButton1Click:Connect(function() i=i%#opts+1; b.Text=tostring(opts[i]); pcall(function() cb(opts[i]) end); save() end)
         return {set=function(v) i=findIdx(opts,v); b.Text=tostring(opts[i]) end}
     end
-
     local function actionBtn(par,label,bg,fg,ord,cb,ht)
-        local b=Instance.new("TextButton"); b.Size=UDim2.new(1,0,0,ht or 30); b.BackgroundColor3=bg; b.BackgroundTransparency=0.08; b.BorderSizePixel=0; b.Text=label; b.TextColor3=fg; b.Font=Enum.Font.GothamBold; b.TextSize=11; b.LayoutOrder=ord; b.AutoButtonColor=false; b.Parent=par; corner(b,8)
+        local b=Instance.new("TextButton"); b.Size=UDim2.new(1,0,0,ht or 28); b.BackgroundColor3=bg; b.BackgroundTransparency=0.1; b.BorderSizePixel=0; b.Text=label; b.TextColor3=fg; b.Font=Enum.Font.GothamBold; b.TextSize=11; b.LayoutOrder=ord; b.AutoButtonColor=false; b.Parent=par; corner(b,8)
         b.MouseEnter:Connect(function() TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0}):Play() end)
-        b.MouseLeave:Connect(function() TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.08}):Play() end)
+        b.MouseLeave:Connect(function() TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.1}):Play() end)
         b.MouseButton1Click:Connect(cb)
         return b
     end
-
     local function hint(par,txt,ord,ht)
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,0,0,ht or 26); l.BackgroundTransparency=1; l.Text=txt; l.TextColor3=TEXT_DIM; l.Font=Enum.Font.Gotham; l.TextSize=9; l.TextXAlignment=Enum.TextXAlignment.Left; l.TextYAlignment=Enum.TextYAlignment.Top; l.TextWrapped=true; l.LayoutOrder=ord; l.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,0,0,ht or 24); l.BackgroundTransparency=1; l.Text=txt; l.TextColor3=TEXT_DIM; l.Font=Enum.Font.Gotham; l.TextSize=9; l.TextXAlignment=Enum.TextXAlignment.Left; l.TextYAlignment=Enum.TextYAlignment.Top; l.TextWrapped=true; l.LayoutOrder=ord; l.Parent=par
         return l
     end
-
     local function playerDrop(par,label,ord,cb)
-        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,28); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-108,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
-        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(98,22); b.Position=UDim2.new(1,-102,0.5,-11); b.BackgroundColor3=INSET; b.BorderSizePixel=0; b.TextColor3=PRIMARY; b.Font=Enum.Font.GothamMedium; b.TextSize=10; b.Text="No target"; b.AutoButtonColor=false; b.Parent=row; corner(b,6); strokeOf(b,Color3.fromRGB(255,255,255),1,0.9)
-        local players={}
-        local idx=0
+        local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,26); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-98,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=11; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=row
+        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(88,20); b.Position=UDim2.new(1,-92,0.5,-10); b.BackgroundColor3=INSET; b.BorderSizePixel=0; b.TextColor3=PRIMARY; b.Font=Enum.Font.GothamMedium; b.TextSize=10; b.Text="No target"; b.AutoButtonColor=false; b.Parent=row; corner(b,6); strokeOf(b,Color3.fromRGB(255,255,255),1,0.9)
+        local players={}; local idx=0
         b.MouseButton1Click:Connect(function()
-            players={}
-            for _,p in ipairs(Players:GetPlayers()) do if p~=LocalPlayer then table.insert(players,p) end end
+            players={}; for _,p in ipairs(Players:GetPlayers()) do if p~=LocalPlayer then table.insert(players,p) end end
             if #players==0 then b.Text="No target"; return end
             idx=idx%#players+1
             if idx==0 then b.Text="No target"; cb(nil) else b.Text=players[idx].Name; cb(players[idx]) end
@@ -1521,79 +1366,65 @@ local function buildGui()
     local farmSwitch = toggleSwitch(mainTab,"AUTO FARM","Harvests currency automatically · starts on execute",C.Farming,no(),function(s) if s then farm() else stopFarm() end end)
     toggleSwitch(mainTab,"Auto-launch on execute","Restore farming automatically when script runs",C.AutoLaunch,no(),function(s) C.AutoLaunch=s end)
 
-    section(mainTab,"Harvest",no())
-    cycleBtn(mainTab,"Currency",{"Coin","Candy","SnowToken","Token","Shell"},C.Currency,no(),function(v) C.Currency=v end)
-    numInput(mainTab,"Travel speed (studs/s)",C.Speed,10,70,no(),function(v) C.Speed=v end)
-    cycleBtn(mainTab,"Farm mode",{"Stealth","Standard","Lay"},C.FarmMode,no(),function(v) C.FarmMode=v end)
-    numInput(mainTab,"Stealth depth (1-8)",C.Depth,1,8,no(),function(v) C.Depth=v end)
-    toggleSwitch(mainTab,"Coin Aura","Touch every coin within radius at once",C.CoinAura,no(),function(s) C.CoinAura=s end)
-    numInput(mainTab,"Aura radius",C.AuraRadius,5,25,no(),function(v) C.AuraRadius=v end)
-    numInput(mainTab,"Bag threshold (50 = default)",C.Threshold,0,999,no(),function(v) C.Threshold=v end)
-
     section(mainTab,"Telemetry",no())
-    local statsPanel=Instance.new("Frame"); statsPanel.Size=UDim2.new(1,0,0,74); statsPanel.BackgroundColor3=INSET; statsPanel.BackgroundTransparency=0.12; statsPanel.BorderSizePixel=0; statsPanel.LayoutOrder=no(); statsPanel.Parent=mainTab; corner(statsPanel,8); strokeOf(statsPanel,PRIMARY,1,0.85)
-    local statsLabel=Instance.new("TextLabel"); statsLabel.Size=UDim2.new(1,-14,1,-8); statsLabel.Position=UDim2.new(0,7,0,4); statsLabel.BackgroundTransparency=1; statsLabel.TextColor3=PRIMARY; statsLabel.Font=Enum.Font.Code; statsLabel.TextSize=11; statsLabel.TextXAlignment=Enum.TextXAlignment.Left; statsLabel.TextYAlignment=Enum.TextYAlignment.Top; statsLabel.TextWrapped=true; statsLabel.Text=""; statsLabel.Parent=statsPanel
+    local statsPanel=Instance.new("Frame"); statsPanel.Size=UDim2.new(1,0,0,68); statsPanel.BackgroundColor3=INSET; statsPanel.BackgroundTransparency=0.1; statsPanel.BorderSizePixel=0; statsPanel.LayoutOrder=no(); statsPanel.Parent=mainTab; corner(statsPanel,8); strokeOf(statsPanel,PRIMARY,1,0.8)
+    local statsLabel=Instance.new("TextLabel"); statsLabel.Size=UDim2.new(1,-12,1,-6); statsLabel.Position=UDim2.new(0,6,0,3); statsLabel.BackgroundTransparency=1; statsLabel.TextColor3=PRIMARY; statsLabel.Font=Enum.Font.Code; statsLabel.TextSize=11; statsLabel.TextXAlignment=Enum.TextXAlignment.Left; statsLabel.TextYAlignment=Enum.TextYAlignment.Top; statsLabel.TextWrapped=true; statsLabel.Text=""; statsLabel.Parent=statsPanel
 
     task.spawn(function()
-        while statsLabel.Parent do
+        while statsLabel and statsLabel.Parent do
             task.wait(0.5)
             local b=statValue()
-            local txt=string.format("Collected: %d  ·  %d/hr\nBag: %s/%d  ·  Fails: %d  ·  Shots: %d\nStatus: %s",
+            local txt=string.format("Collected: %d  |  %d/hr\nBag: %s/%d  |  Fails: %d  |  Shots: %d\nStatus: %s",
                 C.Stats.Total, rate(), b and tostring(b) or "?", threshold(), C.CollectFails, C.ShotsFired, tostring(C.FarmStatus or "idle"))
             statsLabel.Text=txt
             if minStats and minStats.Parent then minStats.Text=txt end
         end
     end)
 
+    section(mainTab,"Harvest",no())
+    cycleBtn(mainTab,"Currency",{"Coin","Candy","SnowToken","Token","Shell"},C.Currency,no(),function(v) C.Currency=v end)
+    numInput(mainTab,"Travel speed",C.Speed,10,70,no(),function(v) C.Speed=v end)
+    cycleBtn(mainTab,"Farm mode",{"Stealth","Standard","Lay"},C.FarmMode,no(),function(v) C.FarmMode=v end)
+    numInput(mainTab,"Stealth depth",C.Depth,1,8,no(),function(v) C.Depth=v end)
+    toggleSwitch(mainTab,"Coin Aura","Touch every coin within radius",C.CoinAura,no(),function(s) C.CoinAura=s end)
+    numInput(mainTab,"Aura radius",C.AuraRadius,5,25,no(),function(v) C.AuraRadius=v end)
+    numInput(mainTab,"Bag threshold",C.Threshold,0,999,no(),function(v) C.Threshold=v end)
+
     -- ============ COMBAT TAB ============
     o=0
     section(combatTab,"Snap-Shot Engine",no())
-    hint(combatTab,"Snaps above the murderer, rides their movement for a few frames, fires point-blank and returns. The server accepts one shot every 3.25s — attempts respect that.",no(),30)
-    toggleSwitch(combatTab,"Auto Snap-Shot on full bag","Fires the engine when bag is full and you hold the badge",C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
-    numInput(combatTab,"Snap height (3-9, 5 = sweet spot)",C.SnapHeight,3,9,no(),function(v) C.SnapHeight=v end)
-    numInput(combatTab,"Max attempts per trigger",C.AutoShootAttempts,1,6,no(),function(v) C.AutoShootAttempts=v end)
+    hint(combatTab,"Snaps above the murderer, rides their movement, fires point-blank and returns. Respects 3.25s server cooldown.",no(),26)
+    toggleSwitch(combatTab,"Auto Snap-Shot on full bag",nil,C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
+    numInput(combatTab,"Snap height (3-9)",C.SnapHeight,3,9,no(),function(v) C.SnapHeight=v end)
+    numInput(combatTab,"Max attempts",C.AutoShootAttempts,1,6,no(),function(v) C.AutoShootAttempts=v end)
     actionBtn(combatTab,"SNAP-SHOT MURDERER NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function()
-        local m=findMurderer()
-        if not m then C.FarmStatus="no murderer" return end
+        local m=findMurderer(); if not m then C.FarmStatus="no murderer" return end
         task.spawn(function() C.FarmStatus="manual snap"; performShot(m,true) end)
     end)
 
     section(combatTab,"Silent Aim & Piercer",no())
-    toggleSwitch(combatTab,"Silent Aim","Redirects your fired shots to the target inside the FOV circle",C.SilentAim,no(),function(s) C.SilentAim=s end)
-    toggleSwitch(combatTab,"Piercer Bullet","Shots ignore walls and geometry — targets through cover",C.Piercer,no(),function(s) C.Piercer=s end)
+    toggleSwitch(combatTab,"Silent Aim","Redirects shots to target in FOV",C.SilentAim,no(),function(s) C.SilentAim=s end)
+    toggleSwitch(combatTab,"Piercer Bullet","Shots ignore walls",C.Piercer,no(),function(s) C.Piercer=s end)
     cycleBtn(combatTab,"Prediction",{"Off","Auto","0.5x","1x","1.5x","2x"},C.PredMode,no(),function(v) C.PredMode=v end)
     numInput(combatTab,"FOV radius (px)",C.ShootFOV,40,500,no(),function(v) C.ShootFOV=v end)
-    toggleSwitch(combatTab,"Show FOV circle","Draws the aim radius on screen",C.ShowFOV,no(),function(s) C.ShowFOV=s end)
-    hint(combatTab,"Prediction: Off = raw position · Auto = ping + travel time · Nx = N × ping latency lead.",no(),22)
+    toggleSwitch(combatTab,"Show FOV circle",nil,C.ShowFOV,no(),function(s) C.ShowFOV=s end)
 
-    section(combatTab,"Fling",no())
+    section(combatTab,"Fling & Roles",no())
     toggleSwitch(combatTab,"Fling murderer on full bag",nil,C.FlingMurderer,no(),function(s) C.FlingMurderer=s end)
     playerDrop(combatTab,"Manual fling target",no(),function(p) C.FlingTarget=p end)
     actionBtn(combatTab,"FLING SELECTED TARGET",PRIMARY,Color3.fromRGB(0,0,0),no(),function()
-        local t=C.FlingTarget
-        if not t or not t.Character then local m=findMurderer(); if m then t=m else return end end
+        local t=C.FlingTarget; if not t or not t.Character then local m=findMurderer(); if m then t=m else return end end
         if t and t.Character then C.FarmStatus="manual fling"; task.spawn(function() flingLoop(t) end) end
     end)
-    actionBtn(combatTab,"FLING MURDERER",Color3.fromRGB(200,60,60),Color3.fromRGB(255,255,255),no(),function()
-        local m=findMurderer(); if m then C.FarmStatus="manual fling"; task.spawn(function() flingLoop(m) end) end
-    end)
-    actionBtn(combatTab,"FLING SHERIFF",Color3.fromRGB(70,110,220),Color3.fromRGB(255,255,255),no(),function()
-        local s=findRole("Sheriff"); if s then C.FarmStatus="manual fling"; task.spawn(function() flingLoop(s) end) end
-    end)
-
-    section(combatTab,"Role Actions",no())
-    toggleSwitch(combatTab,"Murderer: eliminate all on full bag",nil,C.KillMurderer,no(),function(s) C.KillMurderer=s end)
+    toggleSwitch(combatTab,"Murderer: eliminate all",nil,C.KillMurderer,no(),function(s) C.KillMurderer=s end)
     toggleSwitch(combatTab,"Auto grab dropped gun",nil,C.AutoGrabGun,no(),function(s) C.AutoGrabGun=s end)
-    toggleSwitch(combatTab,"Reset when full (innocent)",nil,C.ResetInnocent,no(),function(s) C.ResetInnocent=s end)
+    toggleSwitch(combatTab,"Reset when full",nil,C.ResetInnocent,no(),function(s) C.ResetInnocent=s end)
     toggleSwitch(combatTab,"Reset after action",nil,C.ResetAfterAction,no(),function(s) C.ResetAfterAction=s end)
-    toggleSwitch(combatTab,"Reset as murderer when full",nil,C.ResetMurderer,no(),function(s) C.ResetMurderer=s end)
-    toggleSwitch(combatTab,"Reset regardless of role",nil,C.ResetAnyRole,no(),function(s) C.ResetAnyRole=s end)
 
     -- ============ VISUALS TAB ============
     o=0
-    hint(visualsTab,"2D Box = flat overlay + name · Tracer = line from your position · Chams Fill / Outline = see-through body tint · Glow = engine highlight · 3D Box = world-space cage.",no(),34)
-
-    local function visualSection(catName, dispName, features, col)
+    hint(visualsTab,"2D Box = overlay + name · Tracer = line · Chams = tint · Glow = highlight · 3D Box = cage.",no(),24)
+    local function visualSection(catName, dispName, features)
         section(visualsTab,dispName,no())
         for _,feat in ipairs(features) do
             local key="Visuals_"..feat[2].."_"..catName
@@ -1601,21 +1432,8 @@ local function buildGui()
             toggleSwitch(visualsTab,feat[1],nil,C[key],no(),function(s) C[key]=s; rebuildVisualCache() end)
         end
     end
-
-    local PLAYER_FEATS={
-        {"2D Box + Name","ESP"},
-        {"Tracer Line","TR"},
-        {"Chams Fill","CH"},
-        {"Chams Outline","OL"},
-        {"Glow Highlight","HL"},
-        {"3D Box","BX"},
-    }
-    local OBJ_FEATS={
-        {"3D Box","BX"},
-        {"Chams Fill","CH"},
-        {"Chams Outline","OL"},
-        {"Glow Highlight","HL"},
-    }
+    local PLAYER_FEATS={{"2D Box + Name","ESP"},{"Tracer Line","TR"},{"Chams Fill","CH"},{"Chams Outline","OL"},{"Glow Highlight","HL"},{"3D Box","BX"}}
+    local OBJ_FEATS={{"3D Box","BX"},{"Chams Fill","CH"},{"Chams Outline","OL"},{"Glow Highlight","HL"}}
     visualSection("Murderer","Murderer",PLAYER_FEATS)
     visualSection("Sheriff","Sheriff",PLAYER_FEATS)
     visualSection("Hero","Hero",PLAYER_FEATS)
@@ -1626,89 +1444,88 @@ local function buildGui()
     -- ============ SERVER TAB ============
     o=0
     section(serverTab,"Realm Hop",no())
-    hint(serverTab,"Pool: servers with 1-3 occupants (3 pages scanned). When 15 or fewer solo servers exist they are excluded so they don't fill instantly — a random one of the rest is joined.",no(),40)
+    hint(serverTab,"Scans 1-3 player servers. Excludes solo servers if <=15 exist to prevent instant filling.",no(),30)
     numInput(serverTab,"Auto-hop when players >",C.HopAt,0,50,no(),function(v) C.HopAt=v end)
     actionBtn(serverTab,"HOP NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
-    local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,34); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.12; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=10; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,8)
+    local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,30); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.1; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=10; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,8)
     task.spawn(function() while hopLbl.Parent do task.wait(0.5); hopLbl.Text="  Status: "..(C.HopStatus~="" and C.HopStatus or "idle") end end)
 
     -- ============ MISC TAB ============
     o=0
     section(miscTab,"Protections",no())
-    toggleSwitch(miscTab,"Anti-AFK","Survive the idleness purge",C.AntiAFK,no(),function(s) C.AntiAFK=s; if s then startAFK() end end)
-    toggleSwitch(miscTab,"Anti-Void","Never fall out of the realm",C.AntiVoid,no(),function(s) C.AntiVoid=s; setupVoid() end)
-    toggleSwitch(miscTab,"Anti-Fling","Anchor yourself against displacement",C.AntiFling,no(),function(s) C.AntiFling=s end)
-    toggleSwitch(miscTab,"Anti-Murderer (passive)","Refuse lethal damage when the blade is near",C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
-    toggleSwitch(miscTab,"Noclip","Phase through geometry",C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
-    toggleSwitch(miscTab,"Disable 3D rendering","Low-end boost: hide the world, keep the overlay",C.Disable3D,no(),function(s) C.Disable3D=s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
+    toggleSwitch(miscTab,"Anti-AFK",nil,C.AntiAFK,no(),function(s) C.AntiAFK=s; if s then startAFK() end end)
+    toggleSwitch(miscTab,"Anti-Void",nil,C.AntiVoid,no(),function(s) C.AntiVoid=s; setupVoid() end)
+    toggleSwitch(miscTab,"Anti-Fling",nil,C.AntiFling,no(),function(s) C.AntiFling=s end)
+    toggleSwitch(miscTab,"Anti-Murderer",nil,C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
+    toggleSwitch(miscTab,"Noclip",nil,C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
+    toggleSwitch(miscTab,"Disable 3D rendering",nil,C.Disable3D,no(),function(s) C.Disable3D=s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
 
     section(miscTab,"Map Vote",no())
     local voteOpts={"OFF","Smallest Map","Largest Map","Random"}
     local voteMap={OFF=0,["Smallest Map"]=1,["Largest Map"]=2,Random=3}
     local voteRev={[0]="OFF",[1]="Smallest Map",[2]="Largest Map",[3]="Random"}
     cycleBtn(miscTab,"Vote mode",voteOpts,voteRev[C.VoteMode] or "OFF",no(),function(v) C.VoteMode=voteMap[v] or 0; if C.VoteMode~=0 then startVote() else stopVote() end end)
-    numInput(miscTab,"Max votes (0 = infinite)",C.VoteMax,0,99,no(),function(v) C.VoteMax=v end)
-
-    section(miscTab,"About",no())
-    hint(miscTab,"Lambda Hub v0.40 — Snap-Shot engine studies inspired by Mono. Archived and refined in Unmomolandia.",no(),26)
+    numInput(miscTab,"Max votes (0 = inf)",C.VoteMax,0,99,no(),function(v) C.VoteMax=v end)
 
     -- ============ THEME TAB ============
     o=0
+    section(themeTab,"GUI Scale (Mobile / Desktop)",no())
+    numInput(themeTab,"Scale Multiplier (0.4 - 1.5)",C.GuiScale,0.4,1.5,no(),function(v) C.GuiScale=v; uiScale.Scale=v end)
+
     section(themeTab,"Themes",no())
-    local themeRow=Instance.new("Frame"); themeRow.Size=UDim2.new(1,0,0,30); themeRow.BackgroundTransparency=1; themeRow.LayoutOrder=no(); themeRow.Parent=themeTab
+    local themeRow=Instance.new("Frame"); themeRow.Size=UDim2.new(1,0,0,28); themeRow.BackgroundTransparency=1; themeRow.LayoutOrder=no(); themeRow.Parent=themeTab
     local themeLay=Instance.new("UIListLayout"); themeLay.FillDirection=Enum.FillDirection.Horizontal; themeLay.Padding=UDim.new(0,4); themeLay.Parent=themeRow
     for _,theme in ipairs(THEMES) do
-        local tb=Instance.new("TextButton"); tb.Size=UDim2.new(0,58,1,0); tb.BackgroundColor3=theme.p; tb.BackgroundTransparency=0.1; tb.Text=theme.name; tb.TextColor3=Color3.fromRGB(0,0,0); tb.Font=Enum.Font.GothamBold; tb.TextSize=9; tb.BorderSizePixel=0; tb.AutoButtonColor=false; tb.Parent=themeRow; corner(tb,6)
+        local tb=Instance.new("TextButton"); tb.Size=UDim2.new(0,52,1,0); tb.BackgroundColor3=theme.p; tb.BackgroundTransparency=0.1; tb.Text=theme.name; tb.TextColor3=Color3.fromRGB(0,0,0); tb.Font=Enum.Font.GothamBold; tb.TextSize=9; tb.BorderSizePixel=0; tb.AutoButtonColor=false; tb.Parent=themeRow; corner(tb,6)
         tb.MouseButton1Click:Connect(function() C.PrimaryColor=colorToHex(theme.p); C.SecondaryColor=colorToHex(theme.s); PRIMARY=theme.p; SECONDARY=theme.s; save(); buildGui() end)
     end
 
     section(themeTab,"Primary Color",no())
-    local pPrev=Instance.new("Frame"); pPrev.Size=UDim2.new(1,0,0,22); pPrev.BackgroundColor3=PRIMARY; pPrev.BorderSizePixel=0; pPrev.LayoutOrder=no(); pPrev.Parent=themeTab; corner(pPrev,6)
-    local pHue=Instance.new("TextButton"); pHue.Size=UDim2.new(1,0,0,18); pHue.BackgroundColor3=Color3.new(1,1,1); pHue.BorderSizePixel=0; pHue.Text=""; pHue.AutoButtonColor=false; pHue.LayoutOrder=no(); pHue.Parent=themeTab; corner(pHue,6)
+    local pPrev=Instance.new("Frame"); pPrev.Size=UDim2.new(1,0,0,20); pPrev.BackgroundColor3=PRIMARY; pPrev.BorderSizePixel=0; pPrev.LayoutOrder=no(); pPrev.Parent=themeTab; corner(pPrev,6)
+    local pHue=Instance.new("TextButton"); pHue.Size=UDim2.new(1,0,0,16); pHue.BackgroundColor3=Color3.new(1,1,1); pHue.BorderSizePixel=0; pHue.Text=""; pHue.AutoButtonColor=false; pHue.LayoutOrder=no(); pHue.Parent=themeTab; corner(pHue,6)
     local pHueGrad=Instance.new("UIGradient"); pHueGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,0,0)),ColorSequenceKeypoint.new(1/6,Color3.fromRGB(255,255,0)),ColorSequenceKeypoint.new(2/6,Color3.fromRGB(0,255,0)),ColorSequenceKeypoint.new(3/6,Color3.fromRGB(0,255,255)),ColorSequenceKeypoint.new(4/6,Color3.fromRGB(0,0,255)),ColorSequenceKeypoint.new(5/6,Color3.fromRGB(255,0,255)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,0,0))}); pHueGrad.Parent=pHue
-    pHue.MouseButton1Click:Connect(function() end)
     pHue.InputBegan:Connect(function(input)
         if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
         local rel=(input.Position.X-pHue.AbsolutePosition.X)/math.max(1,pHue.AbsoluteSize.X); rel=math.clamp(rel,0,1)
         local c=Color3.fromHSV(rel,0.85,1); C.PrimaryColor=colorToHex(c); PRIMARY=c; pPrev.BackgroundColor3=c; save()
     end)
-    local pGrid=Instance.new("Frame"); pGrid.Size=UDim2.new(1,0,0,76); pGrid.BackgroundTransparency=1; pGrid.LayoutOrder=no(); pGrid.Parent=themeTab
-    local pGridLay=Instance.new("UIGridLayout"); pGridLay.CellSize=UDim2.new(0,20,0,20); pGridLay.CellPadding=UDim2.new(0,3,0,3); pGridLay.Parent=pGrid
+    local pGrid=Instance.new("Frame"); pGrid.Size=UDim2.new(1,0,0,70); pGrid.BackgroundTransparency=1; pGrid.LayoutOrder=no(); pGrid.Parent=themeTab
+    local pGridLay=Instance.new("UIGridLayout"); pGridLay.CellSize=UDim2.new(0,18,0,18); pGridLay.CellPadding=UDim2.new(0,3,0,3); pGridLay.Parent=pGrid
     for _,c in ipairs(PRESETS) do
-        local sw=Instance.new("TextButton"); sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.AutoButtonColor=false; sw.Parent=pGrid; corner(sw,5)
+        local sw=Instance.new("TextButton"); sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.AutoButtonColor=false; sw.Parent=pGrid; corner(sw,4)
         sw.MouseButton1Click:Connect(function() C.PrimaryColor=colorToHex(c); PRIMARY=c; pPrev.BackgroundColor3=c; save(); buildGui() end)
     end
 
     section(themeTab,"Secondary Color",no())
-    local sPrev=Instance.new("Frame"); sPrev.Size=UDim2.new(1,0,0,22); sPrev.BackgroundColor3=SECONDARY; sPrev.BorderSizePixel=0; sPrev.LayoutOrder=no(); sPrev.Parent=themeTab; corner(sPrev,6); strokeOf(sPrev,Color3.fromRGB(255,255,255),1,0.85)
-    local sHue=Instance.new("TextButton"); sHue.Size=UDim2.new(1,0,0,18); sHue.BackgroundColor3=Color3.new(1,1,1); sHue.BorderSizePixel=0; sHue.Text=""; sHue.AutoButtonColor=false; sHue.LayoutOrder=no(); sHue.Parent=themeTab; corner(sHue,6)
+    local sPrev=Instance.new("Frame"); sPrev.Size=UDim2.new(1,0,0,20); sPrev.BackgroundColor3=SECONDARY; sPrev.BorderSizePixel=0; sPrev.LayoutOrder=no(); sPrev.Parent=themeTab; corner(sPrev,6); strokeOf(sPrev,Color3.fromRGB(255,255,255),1,0.85)
+    local sHue=Instance.new("TextButton"); sHue.Size=UDim2.new(1,0,0,16); sHue.BackgroundColor3=Color3.new(1,1,1); sHue.BorderSizePixel=0; sHue.Text=""; sHue.AutoButtonColor=false; sHue.LayoutOrder=no(); sHue.Parent=themeTab; corner(sHue,6)
     local sHueGrad=pHueGrad:Clone(); sHueGrad.Parent=sHue
     sHue.InputBegan:Connect(function(input)
         if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
         local rel=(input.Position.X-sHue.AbsolutePosition.X)/math.max(1,sHue.AbsoluteSize.X); rel=math.clamp(rel,0,1)
         local c=Color3.fromHSV(rel,0.5,0.22); C.SecondaryColor=colorToHex(c); SECONDARY=c; sPrev.BackgroundColor3=c; save()
     end)
-    local sGrid=Instance.new("Frame"); sGrid.Size=UDim2.new(1,0,0,76); sGrid.BackgroundTransparency=1; sGrid.LayoutOrder=no(); sGrid.Parent=themeTab
-    local sGridLay=Instance.new("UIGridLayout"); sGridLay.CellSize=UDim2.new(0,20,0,20); sGridLay.CellPadding=UDim2.new(0,3,0,3); sGridLay.Parent=sGrid
+    local sGrid=Instance.new("Frame"); sGrid.Size=UDim2.new(1,0,0,70); sGrid.BackgroundTransparency=1; sGrid.LayoutOrder=no(); sGrid.Parent=themeTab
+    local sGridLay=Instance.new("UIGridLayout"); sGridLay.CellSize=UDim2.new(0,18,0,18); sGridLay.CellPadding=UDim2.new(0,3,0,3); sGridLay.Parent=sGrid
     for _,c in ipairs(PRESETS) do
-        local sw=Instance.new("TextButton"); sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.AutoButtonColor=false; sw.Parent=sGrid; corner(sw,5)
+        local sw=Instance.new("TextButton"); sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.AutoButtonColor=false; sw.Parent=sGrid; corner(sw,4)
         sw.MouseButton1Click:Connect(function() C.SecondaryColor=colorToHex(c); SECONDARY=c; sPrev.BackgroundColor3=c; save(); buildGui() end)
     end
     actionBtn(themeTab,"APPLY & REBUILD",PRIMARY,Color3.fromRGB(0,0,0),no(),function() buildGui() end)
 
     -- ===== Window controls =====
     local collapsed=false
-    winBtn(-60,"—",Color3.fromRGB(70,70,80),function()
+    winBtn(-64,"—",Color3.fromRGB(70,70,80),function()
         collapsed=not collapsed
         if collapsed then
-            root.Size=UDim2.fromOffset(ROOT_W,TITLE_H+MIN_STATS_H+10)
+            root.Size=UDim2.fromOffset(ROOT_W,TITLE_H+MIN_STATS_H+12)
             sidebar.Visible=false; content.Visible=false; minBar.Visible=true
         else
             root.Size=UDim2.fromOffset(ROOT_W,ROOT_H)
             sidebar.Visible=true; content.Visible=true; minBar.Visible=false
         end
     end)
-    winBtn(-30,"✕",Color3.fromRGB(150,40,40),function()
+    winBtn(-32,"✕",Color3.fromRGB(150,40,40),function()
         for _,d in pairs(ESP.highlights) do pcall(function() d:Destroy() end) end
         for _,d in pairs(ESP.sboxes) do pcall(function() d:Destroy() end) end
         for _,d in pairs(ESP.coinHL) do pcall(function() d:Destroy() end) end
@@ -1721,7 +1538,6 @@ local function buildGui()
     end)
 
     tabs["Main"].btn.MouseButton1Click:Fire()
-
     return {farmSwitch=farmSwitch}
 end
 
@@ -1750,7 +1566,6 @@ task.spawn(function() scanShootRemotes(true) end)
 
 local guiRefs = buildGui()
 
--- Auto-launch: farm starts automatically on execute
 task.spawn(function()
     task.wait(5)
     if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
@@ -1764,5 +1579,4 @@ task.spawn(function()
     end
 end)
 
-print("[Lambda] v0.40 ready | HWID: "..HWID)
-print("[Lambda] SnapHeight="..C.SnapHeight.." Pred="..C.PredMode.." SilentAim="..tostring(C.SilentAim).." Piercer="..tostring(C.Piercer))
+print("[Lambda] v0.41 ready | HWID: "..HWID)
