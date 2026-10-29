@@ -1,4 +1,4 @@
--- Lambda Hub | v0.47
+-- Lambda Hub | v0.47 by kerli
 -- Server hop | Fling/Touch Fling | Silent aim hook
 
 print("[Lambda] v0.47 loading")
