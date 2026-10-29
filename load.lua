@@ -1,5 +1,5 @@
 -- Lambda Hub | v0.47
--- Autofarm intacto | Server hop corrigido | Fling/Touch Fling reescritos | Silent aim hook
+-- Server hop | Fling/Touch Fling | Silent aim hook
 
 print("[Lambda] v0.47 loading")
 
