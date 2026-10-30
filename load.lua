@@ -1,7 +1,7 @@
--- Lambda Hub | v0.47 | By kerli
--- Void Fling Engine | Touch Fling | Proven Server Hop
+-- Lambda Hub | v0.48 | By kerli
+-- IY Fling Engine | Clean Server Hop | MM2 Direct Remote Shooting | Silent Aim Hook
 
-print("[Lambda] v0.47 loading")
+print("[Lambda] v0.48 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -10,7 +10,6 @@ local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
-local Debris = game:GetService("Debris")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UIS = game:GetService("UserInputService")
@@ -460,41 +459,37 @@ local function killAll()
     end
 end
 
--- ============ VOID FLING ENGINE ============
-local function voidFling(targetPlayer)
+-- ============ IY FLING ENGINE ============
+-- Spins the local player's HRP at extreme angular velocity while overlapping
+-- the target. The physics solver transfers the momentum, throwing them.
+local function flingTarget(targetPlayer)
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
     local tChar = targetPlayer and targetPlayer.Character
-    local tHrp = tChar and tChar:FindFirstChild("HumanoidRootPart")
-    local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
-    if not (tHrp and tHum and tHum.Health > 0) then return false end
-
-    pcall(function() tHrp:SetNetworkOwner(LocalPlayer) end)
-
-    local flingPart = Instance.new("Part")
-    flingPart.Size = Vector3.new(5, 5, 5)
-    flingPart.Transparency = 1
-    flingPart.CanCollide = true
-    flingPart.Anchored = false
-    flingPart.Massless = true
-    flingPart.Parent = workspace
-
+    local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
+    
+    if not (myHRP and tHRP) then return false end
+    
+    if myHum then pcall(function() myHum:ChangeState(Enum.HumanoidStateType.Physics) end) end
+    
     local bav = Instance.new("BodyAngularVelocity")
     bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    bav.AngularVelocity = Vector3.new(99999, 99999, 99999)
-    bav.Parent = flingPart
-
+    bav.AngularVelocity = Vector3.new(0, 99999, 0)
+    bav.Parent = myHRP
+    
     local start = tick()
-    while tick() - start < 1.5 do
-        if not tHrp.Parent or tHum.Health <= 0 then break end
+    while tick() - start < 2.5 do
+        if not tHRP or not tHRP.Parent then break end
         pcall(function()
-            flingPart.CFrame = tHrp.CFrame
-            flingPart.AssemblyLinearVelocity = Vector3.new(99999, 99999, 99999)
-            tHrp.AssemblyLinearVelocity = Vector3.new(99999, 99999, 99999)
-            tHrp.AssemblyAngularVelocity = Vector3.new(99999, 99999, 99999)
+            myHRP.CFrame = tHRP.CFrame
+            myHRP.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         end)
         RunService.Heartbeat:Wait()
     end
-
-    pcall(function() flingPart:Destroy() end)
+    
+    pcall(function() bav:Destroy() end)
+    if myHum then pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end) end
     return true
 end
 
@@ -507,7 +502,7 @@ local function flingLoop(targetPlayer)
         if not tChar then break end
         local tHum = tChar:FindFirstChildOfClass("Humanoid")
         if not tHum or tHum.Health <= 0 then break end
-        voidFling(targetPlayer)
+        flingTarget(targetPlayer)
         task.wait(0.5)
     end
     C.FarmStatus = "fling done"
@@ -520,7 +515,7 @@ local function flingAll()
             if p ~= LocalPlayer and p.Character then
                 local hum = p.Character:FindFirstChildOfClass("Humanoid")
                 if hum and hum.Health > 0 then
-                    voidFling(p)
+                    flingTarget(p)
                     task.wait(0.3)
                 end
             end
@@ -529,339 +524,76 @@ local function flingAll()
     end)
 end
 
--- ============ SNAP-SHOT ENGINE ============
-local SERVER_SHOT_CD = 3.25
-local function getPing()
-    local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
-    return (ok and ping) or 100
-end
-local function pickHitPart(char)
-    if not char then return nil end
-    return char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
-end
-local function predictPos(part)
-    if not part then return nil end
-    local base = part.Position
-    local mode = C.PredMode or "Auto"
-    if mode == "Off" then return base end
-    local vel = part.AssemblyLinearVelocity or Vector3.zero
-    local t = 0
-    if mode == "Auto" then
-        local h = HRP()
-        local dist = h and (h.Position - base).Magnitude or 30
-        t = (getPing()/1000)*0.5 + dist/1100
-    else
-        local mult = tonumber(tostring(mode):gsub("x","")) or 1
-        t = mult * (getPing()/1000)
-    end
-    t = math.clamp(t, 0, 0.5)
-    return base + vel*t
-end
-local shootRemotes = {}
-local lastScan = 0
-local function isShootRemoteName(n)
-    n = tostring(n):lower()
-    return (n:find("shoot") or n:find("gun") or n:find("fire") or n:find("shot") or n:find("revolver") or n:find("pistol")) and true or false
-end
-local function scanShootRemotes(force)
-    if not force and tick() - lastScan < 20 then return end
-    lastScan = tick()
-    local visited = 0
-    local function scan(container, depth)
-        if depth > 4 or visited > 1200 then return end
-        local ok, children = pcall(function() return container:GetChildren() end)
-        if not ok then return end
-        for _, d in ipairs(children) do
-            visited = visited + 1
-            if visited > 1200 then return end
-            if d:IsA("RemoteEvent") and isShootRemoteName(d.Name) then shootRemotes[d] = true
-            elseif depth < 4 and #d:GetChildren() > 0 then scan(d, depth + 1) end
-        end
-    end
-    local gun = rawGunTool()
-    if gun then pcall(function() scan(gun, 0) end) end
-    local main = ReplicatedStorage:FindFirstChild("Main")
-    pcall(function() scan(main or ReplicatedStorage, 0) end)
-end
-local remoteVerdicts = setmetatable({}, {__mode="k"})
-local function isShootRemote(r)
-    local v = remoteVerdicts[r]
-    if v ~= nil then return v end
-    local ok, res = pcall(function()
-        if not r:IsA("RemoteEvent") then return false end
-        if shootRemotes[r] then return true end
-        if isShootRemoteName(r.Name) then return true end
-        local gun = rawGunTool()
-        if gun and r:IsDescendantOf(gun) then return true end
-        return false
-    end)
-    v = (ok and res) or false
-    remoteVerdicts[r] = v
-    return v
-end
-local function isPlayerPart(v)
-    local ok, res = pcall(function()
-        local a = v.Parent
-        while a do if Players:GetPlayerFromCharacter(a) then return true end; a = a.Parent end
-        return false
-    end)
-    return ok and res
-end
-local function closestAliveInFOV()
-    local cam = workspace.CurrentCamera
-    if not cam then return nil end
-    local center = cam.ViewportSize / 2
-    local best, bd = nil, math.huge
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Character then
-            local hu = p.Character:FindFirstChildOfClass("Humanoid")
-            local hr = p.Character:FindFirstChild("HumanoidRootPart")
-            if hu and hr and hu.Health > 0 then
-                local sp, on = cam:WorldToViewportPoint(hr.Position)
-                if on then
-                    local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-                    if d <= C.ShootFOV and d < bd then bd = d; best = p end
-                end
-            end
-        end
-    end
-    return best
-end
-local function getSilentTarget()
-    local r = role()
-    if r == "Murderer" then
-        if C.Piercer then
-            local d = PD()
-            if d then
-                for n, i in pairs(d) do
-                    if not i.Dead and not i.Killed and i.Role ~= "Murderer" then
-                        local p = Players:FindFirstChild(n)
-                        if p and p ~= LocalPlayer and p.Character then return p end
-                    end
-                end
-            end
-        end
-        return closestAliveInFOV()
-    end
-    local m = findMurderer()
-    if m and m.Character then
-        if C.Piercer then return m end
-        local cam = workspace.CurrentCamera
-        local hr = m.Character:FindFirstChild("HumanoidRootPart")
-        if cam and hr then
-            local sp, on = cam:WorldToViewportPoint(hr.Position)
-            if on and (Vector2.new(sp.X, sp.Y) - cam.ViewportSize/2).Magnitude <= C.ShootFOV then return m end
-        end
-    end
-    return nil
-end
-local function rewriteArgs(args, n, target)
-    local char = target.Character
-    local part = pickHitPart(char)
-    if not part then return false end
-    local pos = predictPos(part)
-    if not pos then return false end
-    local myh = HRP()
-    local myPos = myh and myh.Position
-    local changed = false
-    local function fix(v)
-        local ty = typeof(v)
-        if ty == "Instance" and v:IsA("BasePart") then
-            if isPlayerPart(v) then return part, true end
-        elseif ty == "Vector3" then
-            if (not myPos) or (v - myPos).Magnitude > 6 then return pos, true end
-        elseif ty == "CFrame" then
-            return CFrame.lookAt(v.Position, pos), true
-        elseif ty == "Ray" then
-            local dir = pos - v.Origin
-            if dir.Magnitude > 0.01 then return Ray.new(v.Origin, dir.Unit * math.max(dir.Magnitude, 120)), true end
-        end
-        return v, false
-    end
-    for i = 1, n do
-        local v = args[i]
-        if type(v) == "table" then
-            for k, vv in pairs(v) do local nv, ch = fix(vv); if ch then v[k] = nv; changed = true end end
-        else
-            local nv, ch = fix(v)
-            if ch then args[i] = nv; changed = true end
-        end
-    end
-    return changed
-end
-local function fireRemotesAt(target)
-    local char = target.Character
-    local part = pickHitPart(char)
-    local pos = part and predictPos(part)
-    if not (part and pos) then return end
-    for rem in pairs(shootRemotes) do
-        if rem.Parent then
-            pcall(function() rem:FireServer(part, pos) end)
-            pcall(function() rem:FireServer(pos, part) end)
-        end
-    end
-end
-local function performShot(target, tryPierceFirst)
-    local myChar = LocalPlayer.Character
-    local hrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    local hum = myChar and myChar:FindFirstChildOfClass("Humanoid")
-    if not (hrp and hum) or hum.Health <= 0 then return false end
+-- ============ SHOOT MURDERER (MM2 DIRECT REMOTE) ============
+local function shootMurderer()
+    local murderer = findMurderer()
+    if not murderer or not murderer.Character then return false end
+    local mHead = murderer.Character:FindFirstChild("Head")
+    local mHrp = murderer.Character:FindFirstChild("HumanoidRootPart")
+    local target = mHead or mHrp
+    if not target then return false end
+
     local gun = equipGun()
     if not gun then return false end
-    local tChar = target.Character
-    local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-    local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
-    if not (tRoot and tHum) or tHum.Health <= 0 then return true end
-    scanShootRemotes()
-    if tryPierceFirst and C.Piercer then
-        C.FarmStatus = "piercing"
-        for i = 1, 2 do
-            if not tHum.Parent or tHum.Health <= 0 then return true end
-            fireRemotesAt(target)
-            pcall(function() gun:Activate() end)
-            C.LastShot = tick()
-            task.wait(0.4)
-            if not tHum.Parent or tHum.Health <= 0 then return true end
+    
+    pcall(function() gun:Activate() end)
+    task.wait(0.1)
+    
+    local events = gun:FindFirstChild("Events")
+    if events then
+        for _, ev in ipairs(events:GetChildren()) do
+            if ev:IsA("RemoteEvent") then
+                pcall(function() ev:FireServer(target, target.Position) end)
+            end
         end
-        task.wait(math.max(0, SERVER_SHOT_CD - (tick() - C.LastShot)))
     end
-    if not tHum.Parent or tHum.Health <= 0 then return true end
-    local waitLeft = SERVER_SHOT_CD - (tick() - C.LastShot)
-    if waitLeft > 0 then task.wait(waitLeft) end
-    tChar = target.Character
-    tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-    tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
-    if not (tRoot and tHum) or tHum.Health <= 0 then return true end
-    hrp = myChar:FindFirstChild("HumanoidRootPart")
-    if not hrp or not hrp.Parent then return false end
-    C.FarmStatus = "snap-shot"
-    local cam = workspace.CurrentCamera
-    local backCF = hrp.CFrame
-    local backCamCF = cam and cam.CFrame
-    local backCamType = cam and cam.CameraType
-    local wasAnchored = hrp.Anchored
-    local wasCollide = hrp.CanCollide
-    hrp.Anchored = false
-    hrp.CanCollide = false
-    hum.PlatformStand = false
-    if cam then pcall(function() cam.CameraType = Enum.CameraType.Scriptable end) end
-    local height = math.clamp(tonumber(C.SnapHeight) or 5, 3, 9)
-    local fired = false
-    local fireAt = tick() + 0.10
-    local endAt = tick() + 1.6
-    local killed = false
-    while tick() < endAt do
-        tChar = target.Character
-        tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
-        tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
-        if not hrp.Parent then break end
-        if not (tRoot and tHum) then killed = fired; break end
-        if tHum.Health <= 0 or not tHum.Parent then killed = true; break end
-        hrp.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, height, 0))
-        hrp.AssemblyLinearVelocity = tRoot.AssemblyLinearVelocity
-        hrp.AssemblyAngularVelocity = Vector3.zero
-        local hitPart = pickHitPart(tChar)
-        local aimPos = predictPos(hitPart) or tRoot.Position
-        if cam then cam.CFrame = CFrame.lookAt(hrp.Position + Vector3.new(0, 1.2, 0), aimPos) end
-        if not fired and tick() >= fireAt then
-            fired = true
-            C.LastShot = tick()
-            C.ShotsFired = C.ShotsFired + 1
-            pcall(function() gun:Activate() end)
-            task.spawn(function()
-                if not cam then return end
-                local sp = cam:WorldToViewportPoint(aimPos)
-                local isMobile = UIS.TouchEnabled and not UIS.MouseEnabled
-                if isMobile then
-                    pcall(function() VirtualUser:Button1Down(Vector2.new(sp.X, sp.Y), cam.CFrame) end)
-                    task.wait(0.05)
-                    pcall(function() VirtualUser:Button1Up(Vector2.new(sp.X, sp.Y), cam.CFrame) end)
-                else
-                    pcall(function()
-                        VirtualInputManager:SendMouseButtonEvent(sp.X, sp.Y, 0, true, game, 0)
-                        task.wait(0.05)
-                        VirtualInputManager:SendMouseButtonEvent(sp.X, sp.Y, 0, false, game, 0)
-                    end)
-                end
-            end)
-            task.spawn(function() fireRemotesAt(target) end)
-        end
-        if fired and tick() - C.LastShot > 0.45 then
-            tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
-            if not tHum or tHum.Health <= 0 then killed = true end
-            break
-        end
-        RunService.RenderStepped:Wait()
-    end
-    if hrp.Parent then
-        hrp.CanCollide = wasCollide
-        hrp.CFrame = backCF
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.AssemblyAngularVelocity = Vector3.zero
-        hrp.Anchored = wasAnchored
-    end
-    if cam then
-        pcall(function()
-            cam.CameraType = backCamType or Enum.CameraType.Custom
-            if backCamCF and cam.CameraType == Enum.CameraType.Scriptable then cam.CFrame = backCamCF end
-        end)
-    end
-    C.FarmStatus = fired and "shot fired" or "shot failed"
-    return killed
-end
-local function shootMurdererAuto()
-    local attempts = math.clamp(tonumber(C.AutoShootAttempts) or 3, 1, 6)
-    for i = 1, attempts do
-        local m = findMurderer()
-        if not m then return true end
-        if not m.Character then return false end
-        local mh = m.Character:FindFirstChildOfClass("Humanoid")
-        if not mh or mh.Health <= 0 then return true end
-        local myu = HUM()
-        if not myu or myu.Health <= 0 then return false end
-        local killed = performShot(m, i == 1)
-        if killed then return true end
-        if not findMurderer() then return true end
-        task.wait(0.4)
-    end
-    return not findMurderer()
+    return true
 end
 
+-- ============ SILENT AIM & PIERCER HOOK ============
+-- Intercepts the Gun's FireServer calls and rewrites the arguments to point
+-- directly at the Murderer's Head/HRP. This inherently bypasses walls (Piercer)
+-- because the server trusts the client's declared hit position.
 pcall(function()
     if not (getrawmetatable and setreadonly and newcclosure) then return end
     local mt = getrawmetatable(game)
     local oldNC = mt.__namecall
-    local oldNI = mt.__newindex
     setreadonly(mt, false)
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
-        if method == "FireServer" and C.SilentAim and not C.IntentionalReset then
-            local n = select("#", ...)
+        if method == "FireServer" and (C.SilentAim or C.Piercer) and not C.IntentionalReset then
             local args = {...}
-            local rewrote = false
-            pcall(function()
-                if isShootRemote(self) then
-                    local t = getSilentTarget()
-                    if t then rewrote = rewriteArgs(args, n, t) end
-                end
-            end)
-            if rewrote then return oldNC(self, unpack(args, 1, n)) end
-        end
-        if C.AntiMurderer and not C.IntentionalReset then
-            local hum = HUM()
-            if hum and self == hum then
-                if method == "TakeDamage" then return 0 end
-                if method == "ChangeState" then local a = {...}; if a[1] == Enum.HumanoidStateType.Dead then return nil end end
+            local gun = rawGunTool()
+            local isGunRemote = false
+            if gun and self:IsDescendantOf(gun) then isGunRemote = true end
+            if not isGunRemote then
+                local n = tostring(self.Name):lower()
+                if n:find("shoot") or n:find("fire") or n:find("gun") or n:find("shot") then isGunRemote = true end
             end
+            
+            if isGunRemote then
+                local murderer = findMurderer()
+                if murderer and murderer.Character then
+                    local mHead = murderer.Character:FindFirstChild("Head")
+                    local mHrp = murderer.Character:FindFirstChild("HumanoidRootPart")
+                    local target = mHead or mHrp
+                    if target then
+                        for i, v in pairs(args) do
+                            if typeof(v) == "Instance" and v:IsA("BasePart") then
+                                args[i] = target
+                            elseif typeof(v) == "Vector3" then
+                                local myHRP = HRP()
+                                if myHRP and (v - myHRP.Position).Magnitude > 5 then
+                                    args[i] = target.Position
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            return oldNC(self, unpack(args))
         end
         return oldNC(self, ...)
-    end)
-    mt.__newindex = newcclosure(function(self, key, value)
-        if C.AntiMurderer and not C.IntentionalReset then
-            local hum = HUM()
-            if hum and self == hum and key == "Health" and value <= 0 then if murdererNearby() then return end end
-        end
-        return oldNI(self, key, value)
     end)
     setreadonly(mt, true)
 end)
@@ -879,7 +611,7 @@ local function fullBag()
         if C.ResetInnocent then hardReset(); return end
         if did then return end
     elseif r=="Sheriff" or r=="Hero" then
-        if C.ShootSheriff then C.FarmStatus="snap-shot engine"; shootMurdererAuto(); did=true end
+        if C.ShootSheriff then C.FarmStatus="shooting"; shootMurderer(); did=true end
     elseif r=="Murderer" then
         if C.KillMurderer then killAll(); did=true end
         if C.ResetMurderer and not did then hardReset(); return end
@@ -980,7 +712,7 @@ local function stopFarm()
     cleanup()
 end
 
--- ============ SERVER HOP (ASCRON METHOD) ============
+-- ============ SERVER HOP (CLEAN & SIMPLE) ============
 local function httpGet(url)
     local success, result = pcall(function()
         if request then return request({Url=url, Method="GET"}).Body end
@@ -991,73 +723,39 @@ local function httpGet(url)
     return (success and type(result)=="string" and #result>0) and result or nil
 end
 
-local function getServerPool()
-    local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
-    local raw = httpGet(url)
-    if not raw then return {} end
-    local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
-    if not ok or not res or not res.data then return {} end
-    local pool = {}
-    for _, s in ipairs(res.data) do
-        if s.id ~= game.JobId and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then
-            table.insert(pool, s)
-        end
-    end
-    for i = #pool, 2, -1 do local j = math.random(1, i); pool[i], pool[j] = pool[j], pool[i] end
-    return pool
-end
-
-local function tryTeleport(serverId)
-    local failed = false
-    local conn = TeleportService.TeleportInitFailed:Connect(function(plr)
-        if plr == LocalPlayer then failed = true end
-    end)
-    
-    local ok = pcall(function()
-        local opts = Instance.new("TeleportOptions")
-        opts.ServerInstanceId = serverId
-        TeleportService:TeleportAsync(game.PlaceId, {LocalPlayer}, opts)
-    end)
-    
-    if not ok then
-        pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer) end)
-    end
-
-    local start = tick()
-    while tick() - start < 4 do
-        if failed then conn:Disconnect(); return false end
-        task.wait(0.1)
-    end
-    conn:Disconnect()
-    return true
-end
-
 local function hop()
     if C.IsHopping then return end
     C.IsHopping = true
     task.spawn(function()
-        C.HopStatus = "scanning..."
-        local pool = getServerPool()
-        for i, srv in ipairs(pool) do
-            C.HopStatus = "attempt " .. i .. "/" .. #pool
-            if tryTeleport(srv.id) then
-                C.HopStatus = "success"
-                C.IsHopping = false
-                return
+        C.HopStatus = "fetching servers..."
+        local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+        local raw = httpGet(url)
+        if not raw then C.HopStatus = "http failed"; C.IsHopping = false; return end
+        
+        local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
+        if not ok or not res or not res.data then C.HopStatus = "json failed"; C.IsHopping = false; return end
+        
+        local servers = {}
+        for _, s in ipairs(res.data) do
+            if s.id ~= game.JobId and s.playing < s.maxPlayers and s.playing >= 1 then
+                table.insert(servers, s)
             end
-            task.wait(0.3)
         end
-        C.HopStatus = "fallback"
-        local failed = false
-        local conn = TeleportService.TeleportInitFailed:Connect(function(plr) if plr == LocalPlayer then failed = true end end)
+        
+        if #servers == 0 then C.HopStatus = "no servers"; C.IsHopping = false; return end
+        
+        local target = servers[math.random(1, #servers)]
+        C.HopStatus = "jumping to " .. target.playing .. "p..."
+        
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
+        end)
+        
+        task.wait(5)
+        C.HopStatus = "fallback random..."
         pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-        task.wait(4)
-        conn:Disconnect()
-        if not failed then
-            C.HopStatus = "fallback OK"
-        else
-            C.HopStatus = "failed"
-        end
+        
+        task.wait(3)
         C.IsHopping = false
     end)
 end
@@ -1284,7 +982,7 @@ local function buildGui()
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,TITLE_H); titleBar.BackgroundTransparency=1; titleBar.Parent=root
     local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(9,9); dot.Position=UDim2.new(0,10,0.5,-4); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,5)
     local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,70,1,0); title.Position=UDim2.new(0,24,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
-    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.47"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
+    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.48"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
 
     local function winBtn(xOff, txt, bg, cb)
         local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(22,18); b.Position=UDim2.new(1,xOff,0.5,-9); b.BackgroundColor3=bg; b.BackgroundTransparency=0.35; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,4)
@@ -1458,24 +1156,15 @@ local function buildGui()
     numInput(mainTab,"Bag threshold",C.Threshold,0,999,no(),function(v) C.Threshold=v end)
 
     o=0
-    section(combatTab,"Snap-Shot Engine",no())
-    toggleSwitch(combatTab,"Auto Snap-Shot on full bag",nil,C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
-    numInput(combatTab,"Snap height (3-9)",C.SnapHeight,3,9,no(),function(v) C.SnapHeight=v end)
-    numInput(combatTab,"Max attempts",C.AutoShootAttempts,1,6,no(),function(v) C.AutoShootAttempts=v end)
-    actionBtn(combatTab,"SNAP-SHOT MURDERER NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function()
-        local m=findMurderer(); if not m then C.FarmStatus="no murderer" return end
-        task.spawn(function() C.FarmStatus="manual snap"; performShot(m,true) end)
-    end)
-
-    section(combatTab,"Silent Aim & Piercer",no())
-    toggleSwitch(combatTab,"Silent Aim","Redirects shots to target in FOV",C.SilentAim,no(),function(s) C.SilentAim=s end)
-    toggleSwitch(combatTab,"Piercer Bullet","Shots ignore walls",C.Piercer,no(),function(s) C.Piercer=s end)
-    cycleBtn(combatTab,"Prediction",{"Off","Auto","0.5x","1x","1.5x","2x"},C.PredMode,no(),function(v) C.PredMode=v end)
-    numInput(combatTab,"FOV radius (px)",C.ShootFOV,40,500,no(),function(v) C.ShootFOV=v end)
-    toggleSwitch(combatTab,"Show FOV circle",nil,C.ShowFOV,no(),function(s) C.ShowFOV=s end)
+    section(combatTab,"Combat",no())
+    toggleSwitch(combatTab,"Auto Shoot Murderer (Sheriff)",nil,C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
+    actionBtn(combatTab,"SHOOT MURDERER NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() shootMurderer() end)
+    
+    toggleSwitch(combatTab,"Silent Aim","Redirects gun remotes to target",C.SilentAim,no(),function(s) C.SilentAim=s end)
+    toggleSwitch(combatTab,"Piercer Bullet","Ignores walls via remote rewrite",C.Piercer,no(),function(s) C.Piercer=s end)
 
     section(combatTab,"Fling",no())
-    hint(combatTab,"Spawns an invisible, high-velocity part inside the target to violently eject them into the void.",no(),24)
+    hint(combatTab,"Uses the proven IY spin-overlap method to throw players into the void.",no(),24)
     toggleSwitch(combatTab,"Fling murderer on full bag",nil,C.FlingMurderer,no(),function(s) C.FlingMurderer=s end)
     playerDrop(combatTab,"Manual fling target",no(),function(p) C.FlingTarget=p end)
     actionBtn(combatTab,"FLING SELECTED TARGET",PRIMARY,Color3.fromRGB(0,0,0),no(),function()
@@ -1512,7 +1201,7 @@ local function buildGui()
 
     o=0
     section(serverTab,"Realm Hop",no())
-    hint(serverTab,"Scans the API for small servers and uses TeleportAsync with a legacy fallback. Matches proven ASCRON logic.",no(),34)
+    hint(serverTab,"Fetches the server list via API and uses TeleportToPlaceInstance. Simple and crash-proof.",no(),34)
     numInput(serverTab,"Auto-hop when players >",C.HopAt,0,50,no(),function(v) C.HopAt=v end)
     actionBtn(serverTab,"HOP NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
     local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,22); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.1; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=9; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,5)
@@ -1632,7 +1321,7 @@ local function setupCharacterHooks(char)
                 local now = tick()
                 if touchDebounce[otherPlr] and now - touchDebounce[otherPlr] < 2 then return end
                 touchDebounce[otherPlr] = now
-                task.spawn(function() voidFling(otherPlr) end)
+                task.spawn(function() flingTarget(otherPlr) end)
             end
         end)
     end
@@ -1654,7 +1343,6 @@ if C.AntiFling then startAntiFling() end
 if C.Noclip then startNoclip() end
 if C.HopAt>0 then hopMonitor() end
 if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end) end
-task.spawn(function() scanShootRemotes(true) end)
 
 local guiRefs = buildGui()
 
@@ -1671,4 +1359,4 @@ task.spawn(function()
     end
 end)
 
-print("[Lambda] v0.47 ready | HWID: "..HWID)
+print("[Lambda] v0.48 ready | HWID: "..HWID)
