@@ -1,7 +1,9 @@
--- Lambda Hub | v0.48 | By kerli
--- IY Fling Engine | Clean Server Hop | MM2 Direct Remote Shooting | Silent Aim Hook
+-- Lambda Hub | v0.49 | MM2 Script by kerli
+-- Fixed: Shoot Murderer (snap-shot engine restored), Fling returns to start,
+-- Server Hop solo-exclusion rule, Stats persist across hops, Auto-launch fixed,
+-- Language toggle (EN/RU/FI/DE)
 
-print("[Lambda] v0.48 loading")
+print("[Lambda] v0.49 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -46,6 +48,7 @@ getgenv().LAMBDA = getgenv().LAMBDA or {}
 local C = getgenv().LAMBDA
 
 local DEFAULTS = {
+    Language="English",
     Currency="Coin", Speed=35, FarmMode="Stealth", Depth=3, AuraRadius=12, CoinAura=true,
     HopAt=6, AutoLaunch=true, AutoGrabGun=true, GuiScale=1.0,
     Farming=false,
@@ -56,6 +59,7 @@ local DEFAULTS = {
     SnapHeight=5, AutoShootAttempts=3,
     SilentAim=false, Piercer=false, PredMode="Auto", ShootFOV=140, ShowFOV=false,
     TouchFling=false, SecondLife=false,
+    StatsTotal=0,
     PrimaryColor="#FFC800", SecondaryColor="#15151C",
     Visuals_ESP_Murderer=false, Visuals_TR_Murderer=false, Visuals_CH_Murderer=false, Visuals_OL_Murderer=false, Visuals_HL_Murderer=false, Visuals_BX_Murderer=false,
     Visuals_ESP_Sheriff=false,  Visuals_TR_Sheriff=false,  Visuals_CH_Sheriff=false,  Visuals_OL_Sheriff=false,  Visuals_HL_Sheriff=false,  Visuals_BX_Sheriff=false,
@@ -75,7 +79,7 @@ C.FarmThread=nil
 C.HopThread=nil; C.VoteThread=nil
 C.LastFull=tick(); C.Cooldown=0; C.HopStatus=""
 C.IsHopping=false; C.IsTeleporting=false; C.IntentionalReset=false
-C.Stats={Total=0, Start=tick(), Last=0}
+C.Stats={Total=tonumber(C.StatsTotal) or 0, Start=tick(), Last=0}
 C.MissCount=0; C.WasInRound=false
 C.CollectFails=0
 C.LastGunGrab=0
@@ -88,8 +92,124 @@ local function save() local t={} for k,_ in pairs(DEFAULTS) do t[k]=C[k] end pre
 
 local function isKineticBusy()
     local s = C.FarmStatus
-    return s=="snap-shot" or s=="piercing" or s=="manual fling"
+    return s=="snap-shot" or s=="piercing" or s=="manual fling" or s=="manual snap"
         or s=="flinging murderer" or s=="flinging" or s=="fling all" or s=="fling done"
+end
+
+-- ============ LANGUAGE ============
+local TR = {
+English = {
+    tab_main="Main", tab_combat="Combat", tab_visuals="Visuals", tab_server="Server", tab_misc="Misc", tab_theme="Theme",
+    auto_farm="AUTO FARM", auto_farm_desc="Collects currency, starts on execute", auto_launch="Auto-launch on execute",
+    telemetry="Telemetry", harvest="Harvest", currency="Currency", travel_speed="Travel speed", farm_mode="Farm mode",
+    stealth_depth="Stealth depth", coin_aura="Coin Aura", aura_radius="Aura radius", bag_threshold="Bag threshold",
+    st_collected="Collected", st_shots="Shots", st_bag="Bag", st_fails="Fails", st_status="Status",
+    snap_engine="Snap-Shot Engine", auto_snap="Auto Snap-Shot on full bag", snap_height="Snap height (3-9)",
+    max_attempts="Max attempts", snap_now="SHOOT MURDERER NOW", silent_piercer="Silent Aim & Piercer",
+    silent_aim="Silent Aim", silent_aim_desc="Shots redirect to the murderer", piercer="Piercer Bullet",
+    piercer_desc="Shots ignore walls", prediction="Prediction", fov_radius="FOV radius (px)", show_fov="Show FOV circle",
+    fling="Fling", fling_murderer="Fling murderer on full bag", fling_target="Manual fling target",
+    fling_selected="FLING SELECTED TARGET", fling_all="FLING ALL IN SERVER", ward="Touch Fling & Second Life",
+    touch_fling="Touch Fling", touch_fling_desc="Anyone who touches you gets flung", second_life="Second Life",
+    second_life_desc="Rejoin the server when you die", roles="Roles", elim_all="Murderer: eliminate all",
+    auto_grab="Auto grab dropped gun", reset_full="Reset when full", reset_after="Reset after action", no_target="No target",
+    v_murderer="Murderer", v_sheriff="Sheriff", v_hero="Hero", v_innocents="Innocents", v_coins="Coins & Pickups",
+    v_guns="Dropped Guns", f_box="Box + Name", f_tracer="Tracer", f_chams="Chams", f_outline="Outline", f_glow="Glow", f_3dbox="3D Box",
+    server_hop="Server Hop", hop_hint="Finds servers with 1-3 players. Servers with 1 player are excluded if there are 15 or fewer of them.",
+    auto_hop="Auto-hop when players >", hop_now="HOP NOW", status="Status", hop_idle="idle",
+    hop_scanning="scanning servers", hop_attempt="attempt", hop_success="jumping", hop_rejected="rejected", hop_fallback="random server",
+    protections="Protections", anti_afk="Anti-AFK", anti_void="Anti-Void", anti_fling="Anti-Fling",
+    anti_murderer="Anti-Murderer", noclip="Noclip", disable3d="Disable 3D rendering", map_vote="Map Vote",
+    vote_mode="Vote mode", max_votes="Max votes (0 = inf)", language="Language",
+    v_off="OFF", v_smallest="Smallest Map", v_largest="Largest Map", v_random="Random",
+    gui_scale="GUI Scale", scale="Scale (0.4 - 1.6)", themes="Themes", primary="Primary Color",
+    secondary="Secondary Color", rebuild="APPLY & REBUILD",
+},
+Russian = {
+    tab_main="Главная", tab_combat="Бой", tab_visuals="Визуал", tab_server="Сервер", tab_misc="Прочее", tab_theme="Тема",
+    auto_farm="АВТО ФАРМ", auto_farm_desc="Собирает валюту, стартует сразу", auto_launch="Автозапуск при выполнении",
+    telemetry="Статистика", harvest="Сбор", currency="Валюта", travel_speed="Скорость движения", farm_mode="Режим фарма",
+    stealth_depth="Глубина (стелс)", coin_aura="Аура монет", aura_radius="Радиус ауры", bag_threshold="Порог сумки",
+    st_collected="Собрано", st_shots="Выстрелы", st_bag="Сумка", st_fails="Провалы", st_status="Статус",
+    snap_engine="Снап-шот", auto_snap="Авто-выстрел при полной сумке", snap_height="Высота (3-9)",
+    max_attempts="Попытки", snap_now="ВЫСТРЕЛ В УБИЙЦУ", silent_piercer="Скрытый прицел и пробитие",
+    silent_aim="Скрытый прицел", silent_aim_desc="Пули летят в убийцу", piercer="Пробитие стен",
+    piercer_desc="Выстрелы проходят сквозь стены", prediction="Предсказание", fov_radius="Радиус FOV (px)", show_fov="Показать круг FOV",
+    fling="Флинг", fling_murderer="Флинг убийцы при полной сумке", fling_target="Цель флинга",
+    fling_selected="ФЛИНГ ЦЕЛИ", fling_all="ФЛИНГ ВСЕХ", ward="Тач-флинг и вторая жизнь",
+    touch_fling="Тач-флинг", touch_fling_desc="Кто коснётся тебя — улетит", second_life="Вторая жизнь",
+    second_life_desc="Перезайти на сервер после смерти", roles="Роли", elim_all="Убийца: убить всех",
+    auto_grab="Авто-подбор пистолета", reset_full="Сброс при полной сумке", reset_after="Сброс после действия", no_target="Нет цели",
+    v_murderer="Убийца", v_sheriff="Шериф", v_hero="Герой", v_innocents="Невиновные", v_coins="Монеты и предметы",
+    v_guns="Пистолеты на земле", f_box="Бокс + имя", f_tracer="Трейсер", f_chams="Чамсы", f_outline="Обводка", f_glow="Свечение", f_3dbox="3D бокс",
+    server_hop="Смена сервера", hop_hint="Ищет серверы с 1-3 игроками. Серверы с 1 игроком исключаются, если их 15 или меньше.",
+    auto_hop="Авто-хоп если игроков >", hop_now="СМЕНИТЬ СЕРВЕР", status="Статус", hop_idle="ожидание",
+    hop_scanning="поиск серверов", hop_attempt="попытка", hop_success="переход", hop_rejected="отказ", hop_fallback="случайный сервер",
+    protections="Защита", anti_afk="Анти-АФК", anti_void="Анти-войд", anti_fling="Анти-флинг",
+    anti_murderer="Анти-убийца", noclip="Noclip", disable3d="Отключить 3D", map_vote="Голосование за карту",
+    vote_mode="Режим", max_votes="Макс. голосов (0 = ∞)", language="Язык",
+    v_off="ВЫКЛ", v_smallest="Маленькая карта", v_largest="Большая карта", v_random="Случайно",
+    gui_scale="Масштаб GUI", scale="Масштаб (0.4 - 1.6)", themes="Темы", primary="Основной цвет",
+    secondary="Цвет фона", rebuild="ПРИМЕНИТЬ",
+},
+Finnish = {
+    tab_main="Pää", tab_combat="Taistelu", tab_visuals="Näkymät", tab_server="Palvelin", tab_misc="Muut", tab_theme="Teema",
+    auto_farm="AUTOFARM", auto_farm_desc="Kerää valuuttaa, käynnistyy heti", auto_launch="Automaattikäynnistys",
+    telemetry="Tilastot", harvest="Keräys", currency="Valuutta", travel_speed="Liikenopeus", farm_mode="Farm-tila",
+    stealth_depth="Stealth-syvyys", coin_aura="Kolikkoaura", aura_radius="Auran säde", bag_threshold="Laukun raja",
+    st_collected="Kerätty", st_shots="Laukaukset", st_bag="Laukku", st_fails="Virheet", st_status="Tila",
+    snap_engine="Snap-Shot", auto_snap="Automaattinen laukaus täydestä laukusta", snap_height="Korkeus (3-9)",
+    max_attempts="Yritykset", snap_now="AMMU MURHAAJA NYT", silent_piercer="Silent Aim & Piercer",
+    silent_aim="Silent Aim", silent_aim_desc="Laukaukset ohjautuvat murhaajaan", piercer="Piercer",
+    piercer_desc="Laukaukset menevät seinien läpi", prediction="Ennuste", fov_radius="FOV-säde (px)", show_fov="Näytä FOV-ympyrä",
+    fling="Fling", fling_murderer="Flingaa murhaaja täydestä laukusta", fling_target="Fling-kohde",
+    fling_selected="FLINGAA VALITTU", fling_all="FLINGAA KAIKKI", ward="Touch Fling & Toinen elämä",
+    touch_fling="Touch Fling", touch_fling_desc="Sinuun koskeva pelaaja lentää", second_life="Toinen elämä",
+    second_life_desc="Liity palvelimeen uudelleen kuoltuasi", roles="Roolit", elim_all="Murhaaja: tapa kaikki",
+    auto_grab="Poimi pudonnut ase automaattisesti", reset_full="Reset kun laukku täynnä", reset_after="Reset toiminnon jälkeen", no_target="Ei kohdetta",
+    v_murderer="Murhaaja", v_sheriff="Seriffi", v_hero="Sankari", v_innocents="Viattomat", v_coins="Kolikot ja tavarat",
+    v_guns="Pudotetut aseet", f_box="Boksi + nimi", f_tracer="Viiva", f_chams="Chamsit", f_outline="Ääriviivat", f_glow="Hehku", f_3dbox="3D-boksi",
+    server_hop="Palvelinvaihto", hop_hint="Etsii palvelimen, jossa on 1-3 pelaajaa. Yksinpelipalvelimet poistetaan, jos niitä on enintään 15.",
+    auto_hop="Vaihda automaattisesti kun pelaajia >", hop_now="VAIHDA NYT", status="Tila", hop_idle="valmis",
+    hop_scanning="etsitään palvelimia", hop_attempt="yritys", hop_success="siirrytään", hop_rejected="hylätty", hop_fallback="satunnainen palvelin",
+    protections="Suojaus", anti_afk="Anti-AFK", anti_void="Anti-Void", anti_fling="Anti-Fling",
+    anti_murderer="Anti-Murderer", noclip="Noclip", disable3d="Poista 3D-renderöinti", map_vote="Karttaäänestys",
+    vote_mode="Äänestystila", max_votes="Maksimiäänet (0 = rajaton)", language="Kieli",
+    v_off="POIS", v_smallest="Pienin kartta", v_largest="Suurin kartta", v_random="Satunnainen",
+    gui_scale="GUI-koko", scale="Koko (0.4 - 1.6)", themes="Teemat", primary="Pääväri",
+    secondary="Taustaväri", rebuild="TALLETA & UUDELLEENRAKENNA",
+},
+German = {
+    tab_main="Haupt", tab_combat="Kampf", tab_visuals="Sicht", tab_server="Server", tab_misc="Sonstiges", tab_theme="Design",
+    auto_farm="AUTO-FARM", auto_farm_desc="Sammelt Währung, startet sofort", auto_launch="Autostart bei Ausführung",
+    telemetry="Statistik", harvest="Sammeln", currency="Währung", travel_speed="Geschwindigkeit", farm_mode="Farm-Modus",
+    stealth_depth="Stealth-Tiefe", coin_aura="Münz-Aura", aura_radius="Aura-Radius", bag_threshold="Taschen-Limit",
+    st_collected="Gesammelt", st_shots="Schüsse", st_bag="Tasche", st_fails="Fehler", st_status="Status",
+    snap_engine="Snap-Shot", auto_snap="Auto-Schuss bei voller Tasche", snap_height="Höhe (3-9)",
+    max_attempts="Versuche", snap_now="MÖRDER JETZT SCHIESSEN", silent_piercer="Silent Aim & Piercer",
+    silent_aim="Silent Aim", silent_aim_desc="Schüsse treffen den Mörder", piercer="Piercer",
+    piercer_desc="Schüsse durchdringen Wände", prediction="Vorhersage", fov_radius="FOV-Radius (px)", show_fov="FOV-Kreis zeigen",
+    fling="Fling", fling_murderer="Mörder bei voller Tasche flingen", fling_target="Fling-Ziel",
+    fling_selected="ZIEL FLINGEN", fling_all="ALLE FLINGEN", ward="Touch Fling & Zweites Leben",
+    touch_fling="Touch Fling", touch_fling_desc="Wer dich berührt, wird weggeschleudert", second_life="Zweites Leben",
+    second_life_desc="Nach dem Tod neu beitreten", roles="Rollen", elim_all="Mörder: alle eliminieren",
+    auto_grab="Waffe automatisch aufheben", reset_full="Reset bei voller Tasche", reset_after="Reset nach Aktion", no_target="Kein Ziel",
+    v_murderer="Mörder", v_sheriff="Sheriff", v_hero="Held", v_innocents="Unschuldige", v_coins="Münzen & Items",
+    v_guns="Waffen am Boden", f_box="Box + Name", f_tracer="Linie", f_chams="Chams", f_outline="Kontur", f_glow="Glow", f_3dbox="3D-Box",
+    server_hop="Serverwechsel", hop_hint="Findet Server mit 1-3 Spielern. Server mit nur 1 Spieler werden ausgeschlossen, wenn es höchstens 15 davon gibt.",
+    auto_hop="Auto-Wechsel bei mehr Spielern als", hop_now="JETZT WECHSELN", status="Status", hop_idle="bereit",
+    hop_scanning="suche Server", hop_attempt="Versuch", hop_success="wechsle", hop_rejected="abgelehnt", hop_fallback="zufälliger Server",
+    protections="Schutzfunktionen", anti_afk="Anti-AFK", anti_void="Anti-Void", anti_fling="Anti-Fling",
+    anti_murderer="Anti-Mörder", noclip="Noclip", disable3d="3D-Rendering aus", map_vote="Kartenwahl",
+    vote_mode="Wahlmodus", max_votes="Max. Stimmen (0 = unendlich)", language="Sprache",
+    v_off="AUS", v_smallest="Kleinste Karte", v_largest="Größte Karte", v_random="Zufällig",
+    gui_scale="GUI-Größe", scale="Größe (0.4 - 1.6)", themes="Designs", primary="Hauptfarbe",
+    secondary="Hintergrundfarbe", rebuild="ANWENDEN & NEU AUFBAUEN",
+},
+}
+local function L(key)
+    local t = TR[C.Language] or TR["English"]
+    return t[key] or TR["English"][key] or key
 end
 
 -- ============ COLORS ============
@@ -142,16 +262,6 @@ local function findMurderer()
     local d=PD(); if not d then return nil end
     for n,i in pairs(d) do
         if i.Role=="Murderer" and not i.Killed and not i.Dead then
-            local p=Players:FindFirstChild(n)
-            if p and p~=LocalPlayer then return p end
-        end
-    end
-    return nil
-end
-local function findRole(roleName)
-    local d=PD(); if not d then return nil end
-    for n,i in pairs(d) do
-        if i.Role==roleName and not i.Killed and not i.Dead then
             local p=Players:FindFirstChild(n)
             if p and p~=LocalPlayer then return p end
         end
@@ -459,141 +569,436 @@ local function killAll()
     end
 end
 
--- ============ IY FLING ENGINE ============
--- Spins the local player's HRP at extreme angular velocity while overlapping
--- the target. The physics solver transfers the momentum, throwing them.
-local function flingTarget(targetPlayer)
+-- ============ FLING ============
+-- Spin-overlap fling. returnHome=false keeps the character at the target so
+-- repeated attempts don't teleport back and forth; the caller restores origin.
+local function flingTarget(targetPlayer, returnHome)
+    if returnHome == nil then returnHome = true end
     local myChar = LocalPlayer.Character
     local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
     local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
     local tChar = targetPlayer and targetPlayer.Character
     local tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
-    
-    if not (myHRP and tHRP) then return false end
-    
+    if not (myHRP and tHRP and tHRP.Parent) then return false end
+
+    local backCF = myHRP.CFrame
     if myHum then pcall(function() myHum:ChangeState(Enum.HumanoidStateType.Physics) end) end
-    
+
     local bav = Instance.new("BodyAngularVelocity")
     bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
     bav.AngularVelocity = Vector3.new(0, 99999, 0)
     bav.Parent = myHRP
-    
+
     local start = tick()
     while tick() - start < 2.5 do
-        if not tHRP or not tHRP.Parent then break end
+        tChar = targetPlayer.Character
+        tHRP = tChar and tChar:FindFirstChild("HumanoidRootPart")
+        if not myHRP.Parent then break end
+        if not (tHRP and tHRP.Parent) then break end
+        local tHum = tChar:FindFirstChildOfClass("Humanoid")
+        if tHum and tHum.Health <= 0 then break end
         pcall(function()
             myHRP.CFrame = tHRP.CFrame
             myHRP.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
         end)
         RunService.Heartbeat:Wait()
     end
-    
+
     pcall(function() bav:Destroy() end)
-    if myHum then pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end) end
+    if myHRP.Parent then
+        myHRP.AssemblyLinearVelocity = Vector3.zero
+        myHRP.AssemblyAngularVelocity = Vector3.zero
+        if returnHome then
+            myHRP.CFrame = backCF + Vector3.new(0, 3, 0)
+        end
+    end
+    if returnHome and myHum and myHum.Parent then
+        pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+    end
     return true
 end
 
-local touchDebounce = {}
+local function restoreToOrigin(originCF)
+    local h = HRP()
+    if h and h.Parent and originCF then
+        h.AssemblyLinearVelocity = Vector3.zero
+        h.AssemblyAngularVelocity = Vector3.zero
+        h.CFrame = originCF + Vector3.new(0, 3, 0)
+    end
+    local hum = HUM()
+    if hum and hum.Parent then
+        pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+    end
+end
+
 local function flingLoop(targetPlayer)
     C.FarmStatus = "flinging"
-    local deadline = tick() + 6
+    local originCF = HRP() and HRP().CFrame
+    local deadline = tick() + 8
     while tick() < deadline do
         local tChar = targetPlayer.Character
         if not tChar then break end
         local tHum = tChar:FindFirstChildOfClass("Humanoid")
         if not tHum or tHum.Health <= 0 then break end
-        flingTarget(targetPlayer)
-        task.wait(0.5)
+        flingTarget(targetPlayer, false)
+        task.wait(0.3)
     end
+    restoreToOrigin(originCF)
     C.FarmStatus = "fling done"
 end
 
 local function flingAll()
     task.spawn(function()
         C.FarmStatus = "fling all"
+        local originCF = HRP() and HRP().CFrame
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LocalPlayer and p.Character then
                 local hum = p.Character:FindFirstChildOfClass("Humanoid")
                 if hum and hum.Health > 0 then
-                    flingTarget(p)
+                    flingTarget(p, false)
                     task.wait(0.3)
                 end
             end
         end
+        restoreToOrigin(originCF)
         C.FarmStatus = "fling done"
     end)
 end
 
--- ============ SHOOT MURDERER (MM2 DIRECT REMOTE) ============
-local function shootMurderer()
-    local murderer = findMurderer()
-    if not murderer or not murderer.Character then return false end
-    local mHead = murderer.Character:FindFirstChild("Head")
-    local mHrp = murderer.Character:FindFirstChild("HumanoidRootPart")
-    local target = mHead or mHrp
-    if not target then return false end
-
-    local gun = equipGun()
-    if not gun then return false end
-    
-    pcall(function() gun:Activate() end)
-    task.wait(0.1)
-    
-    local events = gun:FindFirstChild("Events")
-    if events then
-        for _, ev in ipairs(events:GetChildren()) do
-            if ev:IsA("RemoteEvent") then
-                pcall(function() ev:FireServer(target, target.Position) end)
+-- ============ SNAP-SHOT ENGINE (SHOOT MURDERER) ============
+local SERVER_SHOT_CD = 3.25
+local function getPing()
+    local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    return (ok and ping) or 100
+end
+local function pickHitPart(char)
+    if not char then return nil end
+    return char:FindFirstChild("Head") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+end
+local function predictPos(part)
+    if not part then return nil end
+    local base = part.Position
+    local mode = C.PredMode or "Auto"
+    if mode == "Off" then return base end
+    local vel = part.AssemblyLinearVelocity or Vector3.zero
+    local t = 0
+    if mode == "Auto" then
+        local h = HRP()
+        local dist = h and (h.Position - base).Magnitude or 30
+        t = (getPing()/1000)*0.5 + dist/1100
+    else
+        local mult = tonumber(tostring(mode):gsub("x","")) or 1
+        t = mult * (getPing()/1000)
+    end
+    t = math.clamp(t, 0, 0.5)
+    return base + vel*t
+end
+local shootRemotes = {}
+local lastScan = 0
+local function isShootRemoteName(n)
+    n = tostring(n):lower()
+    return (n:find("shoot") or n:find("gun") or n:find("fire") or n:find("shot") or n:find("revolver") or n:find("pistol")) and true or false
+end
+local function scanShootRemotes(force)
+    if not force and tick() - lastScan < 20 then return end
+    lastScan = tick()
+    local visited = 0
+    local function scan(container, depth)
+        if depth > 4 or visited > 1200 then return end
+        local ok, children = pcall(function() return container:GetChildren() end)
+        if not ok then return end
+        for _, d in ipairs(children) do
+            visited = visited + 1
+            if visited > 1200 then return end
+            if d:IsA("RemoteEvent") and isShootRemoteName(d.Name) then shootRemotes[d] = true
+            elseif depth < 4 and #d:GetChildren() > 0 then scan(d, depth + 1) end
+        end
+    end
+    local gun = rawGunTool()
+    if gun then pcall(function() scan(gun, 0) end) end
+    local main = ReplicatedStorage:FindFirstChild("Main")
+    pcall(function() scan(main or ReplicatedStorage, 0) end)
+end
+local remoteVerdicts = setmetatable({}, {__mode="k"})
+local function isShootRemote(r)
+    local v = remoteVerdicts[r]
+    if v ~= nil then return v end
+    local ok, res = pcall(function()
+        if not r:IsA("RemoteEvent") then return false end
+        if shootRemotes[r] then return true end
+        if isShootRemoteName(r.Name) then return true end
+        local gun = rawGunTool()
+        if gun and r:IsDescendantOf(gun) then return true end
+        return false
+    end)
+    v = (ok and res) or false
+    remoteVerdicts[r] = v
+    return v
+end
+local function isPlayerPart(v)
+    local ok, res = pcall(function()
+        local a = v.Parent
+        while a do if Players:GetPlayerFromCharacter(a) then return true end; a = a.Parent end
+        return false
+    end)
+    return ok and res
+end
+local function closestAliveInFOV()
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    local center = cam.ViewportSize / 2
+    local best, bd = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character then
+            local hu = p.Character:FindFirstChildOfClass("Humanoid")
+            local hr = p.Character:FindFirstChild("HumanoidRootPart")
+            if hu and hr and hu.Health > 0 then
+                local sp, on = cam:WorldToViewportPoint(hr.Position)
+                if on then
+                    local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                    if d <= C.ShootFOV and d < bd then bd = d; best = p end
+                end
             end
         end
     end
-    return true
+    return best
+end
+local function getSilentTarget()
+    local r = role()
+    if r == "Murderer" then
+        if C.Piercer then
+            local d = PD()
+            if d then
+                for n, i in pairs(d) do
+                    if not i.Dead and not i.Killed and i.Role ~= "Murderer" then
+                        local p = Players:FindFirstChild(n)
+                        if p and p ~= LocalPlayer and p.Character then return p end
+                    end
+                end
+            end
+        end
+        return closestAliveInFOV()
+    end
+    local m = findMurderer()
+    if m and m.Character then
+        if C.Piercer then return m end
+        local cam = workspace.CurrentCamera
+        local hr = m.Character:FindFirstChild("HumanoidRootPart")
+        if cam and hr then
+            local sp, on = cam:WorldToViewportPoint(hr.Position)
+            if on and (Vector2.new(sp.X, sp.Y) - cam.ViewportSize/2).Magnitude <= C.ShootFOV then return m end
+        end
+    end
+    return nil
+end
+local function rewriteArgs(args, n, target)
+    local char = target.Character
+    local part = pickHitPart(char)
+    if not part then return false end
+    local pos = predictPos(part)
+    if not pos then return false end
+    local myh = HRP()
+    local myPos = myh and myh.Position
+    local changed = false
+    local function fix(v)
+        local ty = typeof(v)
+        if ty == "Instance" and v:IsA("BasePart") then
+            if isPlayerPart(v) then return part, true end
+        elseif ty == "Vector3" then
+            if (not myPos) or (v - myPos).Magnitude > 6 then return pos, true end
+        elseif ty == "CFrame" then
+            return CFrame.lookAt(v.Position, pos), true
+        elseif ty == "Ray" then
+            local dir = pos - v.Origin
+            if dir.Magnitude > 0.01 then return Ray.new(v.Origin, dir.Unit * math.max(dir.Magnitude, 120)), true end
+        end
+        return v, false
+    end
+    for i = 1, n do
+        local v = args[i]
+        if type(v) == "table" then
+            for k, vv in pairs(v) do local nv, ch = fix(vv); if ch then v[k] = nv; changed = true end end
+        else
+            local nv, ch = fix(v)
+            if ch then args[i] = nv; changed = true end
+        end
+    end
+    return changed
+end
+local function fireRemotesAt(target)
+    local char = target.Character
+    local part = pickHitPart(char)
+    local pos = part and predictPos(part)
+    if not (part and pos) then return end
+    for rem in pairs(shootRemotes) do
+        if rem.Parent then
+            pcall(function() rem:FireServer(part, pos) end)
+            pcall(function() rem:FireServer(pos, part) end)
+        end
+    end
+end
+local function performShot(target, tryPierceFirst)
+    local myChar = LocalPlayer.Character
+    local hrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    local hum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+    if not (hrp and hum) or hum.Health <= 0 then return false end
+    local gun = equipGun()
+    if not gun then return false end
+    local tChar = target.Character
+    local tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+    local tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+    if not (tRoot and tHum) or tHum.Health <= 0 then return true end
+    scanShootRemotes()
+    if tryPierceFirst and C.Piercer then
+        C.FarmStatus = "piercing"
+        for i = 1, 2 do
+            if not tHum.Parent or tHum.Health <= 0 then return true end
+            fireRemotesAt(target)
+            pcall(function() gun:Activate() end)
+            C.LastShot = tick()
+            task.wait(0.4)
+            if not tHum.Parent or tHum.Health <= 0 then return true end
+        end
+        task.wait(math.max(0, SERVER_SHOT_CD - (tick() - C.LastShot)))
+    end
+    if not tHum.Parent or tHum.Health <= 0 then return true end
+    local waitLeft = SERVER_SHOT_CD - (tick() - C.LastShot)
+    if waitLeft > 0 then task.wait(waitLeft) end
+    tChar = target.Character
+    tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+    tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+    if not (tRoot and tHum) or tHum.Health <= 0 then return true end
+    hrp = myChar:FindFirstChild("HumanoidRootPart")
+    if not hrp or not hrp.Parent then return false end
+    C.FarmStatus = "snap-shot"
+    local cam = workspace.CurrentCamera
+    local backCF = hrp.CFrame
+    local backCamCF = cam and cam.CFrame
+    local backCamType = cam and cam.CameraType
+    local wasAnchored = hrp.Anchored
+    local wasCollide = hrp.CanCollide
+    hrp.Anchored = false
+    hrp.CanCollide = false
+    hum.PlatformStand = false
+    if cam then pcall(function() cam.CameraType = Enum.CameraType.Scriptable end) end
+    local height = math.clamp(tonumber(C.SnapHeight) or 5, 3, 9)
+    local fired = false
+    local fireAt = tick() + 0.10
+    local endAt = tick() + 1.6
+    local killed = false
+    while tick() < endAt do
+        tChar = target.Character
+        tRoot = tChar and tChar:FindFirstChild("HumanoidRootPart")
+        tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+        if not hrp.Parent then break end
+        if not (tRoot and tHum) then killed = fired; break end
+        if tHum.Health <= 0 or not tHum.Parent then killed = true; break end
+        hrp.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, height, 0))
+        hrp.AssemblyLinearVelocity = tRoot.AssemblyLinearVelocity
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        local hitPart = pickHitPart(tChar)
+        local aimPos = predictPos(hitPart) or tRoot.Position
+        if cam then cam.CFrame = CFrame.lookAt(hrp.Position + Vector3.new(0, 1.2, 0), aimPos) end
+        if not fired and tick() >= fireAt then
+            fired = true
+            C.LastShot = tick()
+            C.ShotsFired = C.ShotsFired + 1
+            pcall(function() gun:Activate() end)
+            task.spawn(function()
+                if not cam then return end
+                local sp = cam:WorldToViewportPoint(aimPos)
+                local isMobile = UIS.TouchEnabled and not UIS.MouseEnabled
+                if isMobile then
+                    pcall(function() VirtualUser:Button1Down(Vector2.new(sp.X, sp.Y), cam.CFrame) end)
+                    task.wait(0.05)
+                    pcall(function() VirtualUser:Button1Up(Vector2.new(sp.X, sp.Y), cam.CFrame) end)
+                else
+                    pcall(function()
+                        VirtualInputManager:SendMouseButtonEvent(sp.X, sp.Y, 0, true, game, 0)
+                        task.wait(0.05)
+                        VirtualInputManager:SendMouseButtonEvent(sp.X, sp.Y, 0, false, game, 0)
+                    end)
+                end
+            end)
+            task.spawn(function() fireRemotesAt(target) end)
+        end
+        if fired and tick() - C.LastShot > 0.45 then
+            tHum = tChar and tChar:FindFirstChildOfClass("Humanoid")
+            if not tHum or tHum.Health <= 0 then killed = true end
+            break
+        end
+        RunService.RenderStepped:Wait()
+    end
+    if hrp.Parent then
+        hrp.CanCollide = wasCollide
+        hrp.CFrame = backCF
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+        hrp.Anchored = wasAnchored
+    end
+    if cam then
+        pcall(function()
+            cam.CameraType = backCamType or Enum.CameraType.Custom
+            if backCamCF and cam.CameraType == Enum.CameraType.Scriptable then cam.CFrame = backCamCF end
+        end)
+    end
+    C.FarmStatus = fired and "shot fired" or "shot failed"
+    return killed
+end
+local function shootMurdererAuto()
+    local attempts = math.clamp(tonumber(C.AutoShootAttempts) or 3, 1, 6)
+    for i = 1, attempts do
+        local m = findMurderer()
+        if not m then return true end
+        if not m.Character then return false end
+        local mh = m.Character:FindFirstChildOfClass("Humanoid")
+        if not mh or mh.Health <= 0 then return true end
+        local myu = HUM()
+        if not myu or myu.Health <= 0 then return false end
+        local killed = performShot(m, i == 1)
+        if killed then return true end
+        if not findMurderer() then return true end
+        task.wait(0.4)
+    end
+    return not findMurderer()
 end
 
--- ============ SILENT AIM & PIERCER HOOK ============
--- Intercepts the Gun's FireServer calls and rewrites the arguments to point
--- directly at the Murderer's Head/HRP. This inherently bypasses walls (Piercer)
--- because the server trusts the client's declared hit position.
+-- ============ SILENT AIM / ANTI-MURDERER HOOK ============
 pcall(function()
     if not (getrawmetatable and setreadonly and newcclosure) then return end
     local mt = getrawmetatable(game)
     local oldNC = mt.__namecall
+    local oldNI = mt.__newindex
     setreadonly(mt, false)
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
-        if method == "FireServer" and (C.SilentAim or C.Piercer) and not C.IntentionalReset then
+        if method == "FireServer" and C.SilentAim and not C.IntentionalReset then
+            local n = select("#", ...)
             local args = {...}
-            local gun = rawGunTool()
-            local isGunRemote = false
-            if gun and self:IsDescendantOf(gun) then isGunRemote = true end
-            if not isGunRemote then
-                local n = tostring(self.Name):lower()
-                if n:find("shoot") or n:find("fire") or n:find("gun") or n:find("shot") then isGunRemote = true end
-            end
-            
-            if isGunRemote then
-                local murderer = findMurderer()
-                if murderer and murderer.Character then
-                    local mHead = murderer.Character:FindFirstChild("Head")
-                    local mHrp = murderer.Character:FindFirstChild("HumanoidRootPart")
-                    local target = mHead or mHrp
-                    if target then
-                        for i, v in pairs(args) do
-                            if typeof(v) == "Instance" and v:IsA("BasePart") then
-                                args[i] = target
-                            elseif typeof(v) == "Vector3" then
-                                local myHRP = HRP()
-                                if myHRP and (v - myHRP.Position).Magnitude > 5 then
-                                    args[i] = target.Position
-                                end
-                            end
-                        end
-                    end
+            local rewrote = false
+            pcall(function()
+                if isShootRemote(self) then
+                    local t = getSilentTarget()
+                    if t then rewrote = rewriteArgs(args, n, t) end
                 end
+            end)
+            if rewrote then return oldNC(self, unpack(args, 1, n)) end
+        end
+        if C.AntiMurderer and not C.IntentionalReset then
+            local hum = HUM()
+            if hum and self == hum then
+                if method == "TakeDamage" then return 0 end
+                if method == "ChangeState" then local a = {...}; if a[1] == Enum.HumanoidStateType.Dead then return nil end end
             end
-            return oldNC(self, unpack(args))
         end
         return oldNC(self, ...)
+    end)
+    mt.__newindex = newcclosure(function(self, key, value)
+        if C.AntiMurderer and not C.IntentionalReset then
+            local hum = HUM()
+            if hum and self == hum and key == "Health" and value <= 0 then if murdererNearby() then return end end
+        end
+        return oldNI(self, key, value)
     end)
     setreadonly(mt, true)
 end)
@@ -611,7 +1016,7 @@ local function fullBag()
         if C.ResetInnocent then hardReset(); return end
         if did then return end
     elseif r=="Sheriff" or r=="Hero" then
-        if C.ShootSheriff then C.FarmStatus="shooting"; shootMurderer(); did=true end
+        if C.ShootSheriff then C.FarmStatus="snap-shot engine"; shootMurdererAuto(); did=true end
     elseif r=="Murderer" then
         if C.KillMurderer then killAll(); did=true end
         if C.ResetMurderer and not did then hardReset(); return end
@@ -620,21 +1025,29 @@ local function fullBag()
     if C.ResetAnyRole then hardReset() end
 end
 
--- ============ STATS / ROUND WATCHER ============
+-- ============ STATS ============
 local function statsTick()
     task.spawn(function()
         LocalPlayer:WaitForChild("leaderstats",10); task.wait(1)
         C.Stats.Last=statValue() or 0
+        local saveCounter=0
         while true do
             task.wait(0.5)
             local v=statValue()
             if v and C.Stats.Last and v>C.Stats.Last then C.Stats.Total=C.Stats.Total+(v-C.Stats.Last) end
             if v then C.Stats.Last=v end
+            saveCounter=saveCounter+1
+            if saveCounter>=8 then
+                saveCounter=0
+                C.StatsTotal=C.Stats.Total
+                save()
+            end
         end
     end)
 end
 local function rate() local e=math.max(1,tick()-C.Stats.Start); return math.floor((C.Stats.Total/e)*3600) end
 
+-- ============ ROUND WATCHER ============
 task.spawn(function()
     local lastC=nil
     while true do
@@ -702,17 +1115,17 @@ local function farmLoopFn()
     C.FarmThread=nil
 end
 local function farm()
-    if C.FarmThread then return end
+    if C.FarmThread and coroutine.status(C.FarmThread) ~= "dead" then return end
     C.Farming=true; C.FarmStatus="starting"
     C.FarmThread=task.spawn(farmLoopFn)
 end
 local function stopFarm()
     C.Farming=false; C.FarmStatus="idle"
-    if C.FarmThread then task.cancel(C.FarmThread); C.FarmThread=nil end
+    if C.FarmThread then pcall(function() task.cancel(C.FarmThread) end); C.FarmThread=nil end
     cleanup()
 end
 
--- ============ SERVER HOP (CLEAN & SIMPLE) ============
+-- ============ SERVER HOP ============
 local function httpGet(url)
     local success, result = pcall(function()
         if request then return request({Url=url, Method="GET"}).Body end
@@ -722,40 +1135,91 @@ local function httpGet(url)
     end)
     return (success and type(result)=="string" and #result>0) and result or nil
 end
-
+local function fetchServerPage(cursor)
+    local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
+    if cursor and cursor ~= "" then url = url .. "&cursor=" .. HttpService:UrlEncode(cursor) end
+    local raw = httpGet(url)
+    if not raw then return nil end
+    local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not ok or type(res) ~= "table" then return nil end
+    return res
+end
+local function collectServerCandidates()
+    local cands = {}
+    local cursor = nil
+    for page = 1, 3 do
+        local res = fetchServerPage(cursor)
+        if not res or type(res.data) ~= "table" then break end
+        for _, s in ipairs(res.data) do
+            if type(s)=="table" and s.id and s.id ~= game.JobId and type(s.playing)=="number" and type(s.maxPlayers)=="number" and s.playing >= 1 and s.playing <= 3 and s.playing < s.maxPlayers then table.insert(cands, s) end
+        end
+        cursor = res.nextPageCursor
+        if not cursor or cursor == "" then break end
+        if #cands >= 60 then break end
+        task.wait(0.15)
+    end
+    return cands
+end
+local function tryTeleport(serverId)
+    local failed, reason = false, ""
+    local conn = TeleportService.TeleportInitFailed:Connect(function(plr, result, message)
+        if plr == LocalPlayer then
+            failed = true
+            reason = tostring(message or result or "")
+        end
+    end)
+    local ok = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId, LocalPlayer)
+    end)
+    if not ok then pcall(function() conn:Disconnect() end); return false, "call error" end
+    local elapsed = 0
+    while elapsed < 5 and not failed do task.wait(0.1); elapsed = elapsed + 0.1 end
+    pcall(function() conn:Disconnect() end)
+    if failed then return false, reason end
+    return true, ""
+end
 local function hop()
     if C.IsHopping then return end
     C.IsHopping = true
     task.spawn(function()
-        C.HopStatus = "fetching servers..."
-        local url = string.format("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100", game.PlaceId)
-        local raw = httpGet(url)
-        if not raw then C.HopStatus = "http failed"; C.IsHopping = false; return end
-        
-        local ok, res = pcall(function() return HttpService:JSONDecode(raw) end)
-        if not ok or not res or not res.data then C.HopStatus = "json failed"; C.IsHopping = false; return end
-        
-        local servers = {}
-        for _, s in ipairs(res.data) do
-            if s.id ~= game.JobId and s.playing < s.maxPlayers and s.playing >= 1 then
-                table.insert(servers, s)
-            end
+        -- persist stats before leaving
+        C.StatsTotal = C.Stats.Total
+        save()
+
+        C.HopStatus = L("hop_scanning")
+        local ok, cands = pcall(collectServerCandidates)
+        if not ok or type(cands) ~= "table" then cands = {} end
+
+        -- Pool rule: exclude 1-player servers if there are 15 or fewer of them
+        local ones, others = {}, {}
+        for _, s in ipairs(cands) do
+            if s.playing == 1 then table.insert(ones, s) else table.insert(others, s) end
         end
-        
-        if #servers == 0 then C.HopStatus = "no servers"; C.IsHopping = false; return end
-        
-        local target = servers[math.random(1, #servers)]
-        C.HopStatus = "jumping to " .. target.playing .. "p..."
-        
-        pcall(function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, target.id, LocalPlayer)
-        end)
-        
-        task.wait(5)
-        C.HopStatus = "fallback random..."
+        local pool = cands
+        if #ones <= 15 and #others > 0 then pool = others end
+        for i = #pool, 2, -1 do
+            local j = math.random(i)
+            pool[i], pool[j] = pool[j], pool[i]
+        end
+
+        local maxAttempts = math.min(#pool, 4)
+        for i = 1, maxAttempts do
+            C.HopStatus = string.format("%s %d/%d (%dp)", L("hop_attempt"), i, maxAttempts, pool[i].playing)
+            local success, reason = tryTeleport(pool[i].id)
+            if success then
+                C.HopStatus = L("hop_success")
+                task.wait(4)
+                C.IsHopping = false
+                return
+            end
+            C.HopStatus = L("hop_rejected") .. ": " .. string.sub(tostring(reason or "?"), 1, 30)
+            task.wait(0.5)
+        end
+
+        C.HopStatus = L("hop_fallback")
+        task.wait(0.5)
         pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
-        
-        task.wait(3)
+        task.wait(5)
         C.IsHopping = false
     end)
 end
@@ -919,7 +1383,7 @@ Players.PlayerRemoving:Connect(function(p)
     if ESP.sboxes[p] then pcall(function() ESP.sboxes[p]:Destroy() end); ESP.sboxes[p]=nil end
 end)
 
--- ============ DENSE ADAPTIVE GUI ============
+-- ============ GUI ============
 local function guiParent()
     do local ok,r=pcall(function() return gethui() end); if ok and r then return r end end
     do local ok,r=pcall(function() return game:GetService("CoreGui") end); if ok and r then return r end end
@@ -943,6 +1407,7 @@ local function strokeOf(o,col,th,tr)
     s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border; s.Parent=o; return s
 end
 local FAST_TWEEN = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local guiRefs = nil
 
 local function buildGui()
     if MAIN_GUI then pcall(function() MAIN_GUI:Destroy() end) end
@@ -982,7 +1447,7 @@ local function buildGui()
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,TITLE_H); titleBar.BackgroundTransparency=1; titleBar.Parent=root
     local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(9,9); dot.Position=UDim2.new(0,10,0.5,-4); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,5)
     local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,70,1,0); title.Position=UDim2.new(0,24,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
-    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.48"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
+    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.49"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
 
     local function winBtn(xOff, txt, bg, cb)
         local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(22,18); b.Position=UDim2.new(1,xOff,0.5,-9); b.BackgroundColor3=bg; b.BackgroundTransparency=0.35; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,4)
@@ -1021,17 +1486,17 @@ local function buildGui()
         return f
     end
 
-    local mainTab    = newTab("Main",1)
-    local combatTab  = newTab("Combat",2)
-    local visualsTab = newTab("Visuals",3)
-    local serverTab  = newTab("Server",4)
-    local miscTab    = newTab("Misc",5)
-    local themeTab   = newTab("Theme",6)
+    local mainTab    = newTab(L("tab_main"),1)
+    local combatTab  = newTab(L("tab_combat"),2)
+    local visualsTab = newTab(L("tab_visuals"),3)
+    local serverTab  = newTab(L("tab_server"),4)
+    local miscTab    = newTab(L("tab_misc"),5)
+    local themeTab   = newTab(L("tab_theme"),6)
 
     local function section(par,txt,ord)
         local f=Instance.new("Frame"); f.Size=UDim2.new(1,0,0,13); f.BackgroundTransparency=1; f.LayoutOrder=ord; f.Parent=par
-        local l=Instance.new("TextLabel"); l.Size=UDim2.new(0,#txt*6+6,1,0); l.BackgroundTransparency=1; l.Text=string.upper(txt); l.TextColor3=PRIMARY; l.TextTransparency=0.1; l.Font=Enum.Font.GothamBold; l.TextSize=9; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=f
-        local line=Instance.new("Frame"); line.Size=UDim2.new(1,-(#txt*6+12),0,1); line.Position=UDim2.new(0,#txt*6+10,0.5,0); line.BackgroundColor3=Color3.fromRGB(255,255,255); line.BackgroundTransparency=0.88; line.BorderSizePixel=0; line.Parent=f
+        local l=Instance.new("TextLabel"); l.Size=UDim2.new(0,#txt*6+10,1,0); l.BackgroundTransparency=1; l.Text=string.upper(txt); l.TextColor3=PRIMARY; l.TextTransparency=0.1; l.Font=Enum.Font.GothamBold; l.TextSize=9; l.TextXAlignment=Enum.TextXAlignment.Left; l.Parent=f
+        local line=Instance.new("Frame"); line.Size=UDim2.new(1,-(#txt*6+16),0,1); line.Position=UDim2.new(0,#txt*6+14,0.5,0); line.BackgroundColor3=Color3.fromRGB(255,255,255); line.BackgroundTransparency=0.88; line.BorderSizePixel=0; line.Parent=f
         return f
     end
     local function toggleSwitch(par,txt,desc,init,ord,cb)
@@ -1114,13 +1579,13 @@ local function buildGui()
     local function playerDrop(par,label,ord,cb)
         local row=Instance.new("Frame"); row.Size=UDim2.new(1,0,0,21); row.BackgroundTransparency=1; row.LayoutOrder=ord; row.Parent=par
         local l=Instance.new("TextLabel"); l.Size=UDim2.new(1,-80,1,0); l.Position=UDim2.new(0,2,0,0); l.BackgroundTransparency=1; l.Text=label; l.TextColor3=TEXT_BRIGHT; l.Font=Enum.Font.Gotham; l.TextSize=10; l.TextXAlignment=Enum.TextXAlignment.Left; l.TextTruncate=Enum.TextTruncate.AtEnd; l.Parent=row
-        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(74,17); b.Position=UDim2.new(1,-78,0.5,-8); b.BackgroundColor3=INSET; b.BorderSizePixel=0; b.TextColor3=PRIMARY; b.Font=Enum.Font.GothamMedium; b.TextSize=9; b.Text="No target"; b.AutoButtonColor=false; b.Parent=row; corner(b,5); strokeOf(b,Color3.fromRGB(255,255,255),1,0.9)
+        local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(74,17); b.Position=UDim2.new(1,-78,0.5,-8); b.BackgroundColor3=INSET; b.BorderSizePixel=0; b.TextColor3=PRIMARY; b.Font=Enum.Font.GothamMedium; b.TextSize=9; b.Text=L("no_target"); b.AutoButtonColor=false; b.Parent=row; corner(b,5); strokeOf(b,Color3.fromRGB(255,255,255),1,0.9)
         local players={}; local idx=0
         b.MouseButton1Click:Connect(function()
             players={}; for _,p in ipairs(Players:GetPlayers()) do if p~=LocalPlayer then table.insert(players,p) end end
-            if #players==0 then b.Text="No target"; return end
+            if #players==0 then b.Text=L("no_target"); return end
             idx=idx%#players+1
-            if idx==0 then b.Text="No target"; cb(nil) else b.Text=players[idx].Name; cb(players[idx]) end
+            if idx==0 then b.Text=L("no_target"); cb(nil) else b.Text=players[idx].Name; cb(players[idx]) end
             save()
         end)
         return row
@@ -1128,10 +1593,11 @@ local function buildGui()
 
     local o=0; local function no() o=o+1; return o end
 
-    local farmSwitch = toggleSwitch(mainTab,"AUTO FARM","Harvests currency · starts on execute",C.Farming,no(),function(s) if s then farm() else stopFarm() end end)
-    toggleSwitch(mainTab,"Auto-launch on execute",nil,C.AutoLaunch,no(),function(s) C.AutoLaunch=s end)
+    -- ===== MAIN =====
+    local farmSwitch = toggleSwitch(mainTab,L("auto_farm"),L("auto_farm_desc"),C.Farming,no(),function(s) if s then C.FarmThread=nil; farm() else stopFarm() end end)
+    toggleSwitch(mainTab,L("auto_launch"),nil,C.AutoLaunch,no(),function(s) C.AutoLaunch=s end)
 
-    section(mainTab,"Telemetry",no())
+    section(mainTab,L("telemetry"),no())
     local statsPanel=Instance.new("Frame"); statsPanel.Size=UDim2.new(1,0,0,40); statsPanel.BackgroundColor3=INSET; statsPanel.BackgroundTransparency=0.1; statsPanel.BorderSizePixel=0; statsPanel.LayoutOrder=no(); statsPanel.Parent=mainTab; corner(statsPanel,6); strokeOf(statsPanel,PRIMARY,1,0.8)
     local statsLabel=Instance.new("TextLabel"); statsLabel.Size=UDim2.new(1,-8,1,-4); statsLabel.Position=UDim2.new(0,4,0,2); statsLabel.BackgroundTransparency=1; statsLabel.TextColor3=PRIMARY; statsLabel.Font=Enum.Font.Code; statsLabel.TextSize=10; statsLabel.TextXAlignment=Enum.TextXAlignment.Left; statsLabel.TextYAlignment=Enum.TextYAlignment.Top; statsLabel.TextWrapped=true; statsLabel.Text=""; statsLabel.Parent=statsPanel
 
@@ -1139,100 +1605,125 @@ local function buildGui()
         while statsLabel and statsLabel.Parent do
             task.wait(0.5)
             local b=statValue()
-            local txt=string.format("Collected: %d  |  %d/hr  |  Shots: %d\nBag: %s/%d  |  Fails: %d\nStatus: %s",
-                C.Stats.Total, rate(), C.ShotsFired, b and tostring(b) or "?", threshold(), C.CollectFails, tostring(C.FarmStatus or "idle"))
+            local txt=string.format("%s: %d | %d/h | %s: %d\n%s: %s/%d | %s: %d\n%s: %s",
+                L("st_collected"), C.Stats.Total, rate(), L("st_shots"), C.ShotsFired,
+                L("st_bag"), b and tostring(b) or "?", threshold(), L("st_fails"), C.CollectFails,
+                L("st_status"), tostring(C.FarmStatus or "idle"))
             statsLabel.Text=txt
             if minStats and minStats.Parent then minStats.Text=txt end
         end
     end)
 
-    section(mainTab,"Harvest",no())
-    cycleBtn(mainTab,"Currency",{"Coin","Candy","SnowToken","Token","Shell"},C.Currency,no(),function(v) C.Currency=v end)
-    numInput(mainTab,"Travel speed",C.Speed,10,70,no(),function(v) C.Speed=v end)
-    cycleBtn(mainTab,"Farm mode",{"Stealth","Standard","Lay"},C.FarmMode,no(),function(v) C.FarmMode=v end)
-    numInput(mainTab,"Stealth depth",C.Depth,1,8,no(),function(v) C.Depth=v end)
-    toggleSwitch(mainTab,"Coin Aura",nil,C.CoinAura,no(),function(s) C.CoinAura=s end)
-    numInput(mainTab,"Aura radius",C.AuraRadius,5,25,no(),function(v) C.AuraRadius=v end)
-    numInput(mainTab,"Bag threshold",C.Threshold,0,999,no(),function(v) C.Threshold=v end)
+    section(mainTab,L("harvest"),no())
+    cycleBtn(mainTab,L("currency"),{"Coin","Candy","SnowToken","Token","Shell"},C.Currency,no(),function(v) C.Currency=v end)
+    numInput(mainTab,L("travel_speed"),C.Speed,10,70,no(),function(v) C.Speed=v end)
+    cycleBtn(mainTab,L("farm_mode"),{"Stealth","Standard","Lay"},C.FarmMode,no(),function(v) C.FarmMode=v end)
+    numInput(mainTab,L("stealth_depth"),C.Depth,1,8,no(),function(v) C.Depth=v end)
+    toggleSwitch(mainTab,L("coin_aura"),nil,C.CoinAura,no(),function(s) C.CoinAura=s end)
+    numInput(mainTab,L("aura_radius"),C.AuraRadius,5,25,no(),function(v) C.AuraRadius=v end)
+    numInput(mainTab,L("bag_threshold"),C.Threshold,0,999,no(),function(v) C.Threshold=v end)
 
+    -- ===== COMBAT =====
     o=0
-    section(combatTab,"Combat",no())
-    toggleSwitch(combatTab,"Auto Shoot Murderer (Sheriff)",nil,C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
-    actionBtn(combatTab,"SHOOT MURDERER NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() shootMurderer() end)
-    
-    toggleSwitch(combatTab,"Silent Aim","Redirects gun remotes to target",C.SilentAim,no(),function(s) C.SilentAim=s end)
-    toggleSwitch(combatTab,"Piercer Bullet","Ignores walls via remote rewrite",C.Piercer,no(),function(s) C.Piercer=s end)
+    section(combatTab,L("snap_engine"),no())
+    toggleSwitch(combatTab,L("auto_snap"),nil,C.ShootSheriff,no(),function(s) C.ShootSheriff=s end)
+    numInput(combatTab,L("snap_height"),C.SnapHeight,3,9,no(),function(v) C.SnapHeight=v end)
+    numInput(combatTab,L("max_attempts"),C.AutoShootAttempts,1,6,no(),function(v) C.AutoShootAttempts=v end)
+    actionBtn(combatTab,L("snap_now"),PRIMARY,Color3.fromRGB(0,0,0),no(),function()
+        local m=findMurderer(); if not m then C.FarmStatus="no murderer"; return end
+        task.spawn(function() C.FarmStatus="manual snap"; performShot(m,true) end)
+    end)
 
-    section(combatTab,"Fling",no())
-    hint(combatTab,"Uses the proven IY spin-overlap method to throw players into the void.",no(),24)
-    toggleSwitch(combatTab,"Fling murderer on full bag",nil,C.FlingMurderer,no(),function(s) C.FlingMurderer=s end)
-    playerDrop(combatTab,"Manual fling target",no(),function(p) C.FlingTarget=p end)
-    actionBtn(combatTab,"FLING SELECTED TARGET",PRIMARY,Color3.fromRGB(0,0,0),no(),function()
+    section(combatTab,L("silent_piercer"),no())
+    toggleSwitch(combatTab,L("silent_aim"),L("silent_aim_desc"),C.SilentAim,no(),function(s) C.SilentAim=s end)
+    toggleSwitch(combatTab,L("piercer"),L("piercer_desc"),C.Piercer,no(),function(s) C.Piercer=s end)
+    cycleBtn(combatTab,L("prediction"),{"Off","Auto","0.5x","1x","1.5x","2x"},C.PredMode,no(),function(v) C.PredMode=v end)
+    numInput(combatTab,L("fov_radius"),C.ShootFOV,40,500,no(),function(v) C.ShootFOV=v end)
+    toggleSwitch(combatTab,L("show_fov"),nil,C.ShowFOV,no(),function(s) C.ShowFOV=s end)
+
+    section(combatTab,L("fling"),no())
+    toggleSwitch(combatTab,L("fling_murderer"),nil,C.FlingMurderer,no(),function(s) C.FlingMurderer=s end)
+    playerDrop(combatTab,L("fling_target"),no(),function(p) C.FlingTarget=p end)
+    actionBtn(combatTab,L("fling_selected"),PRIMARY,Color3.fromRGB(0,0,0),no(),function()
         local t=C.FlingTarget; if not t or not t.Character then local m=findMurderer(); if m then t=m else return end end
         if t and t.Character then C.FarmStatus="manual fling"; task.spawn(function() flingLoop(t) end) end
     end)
-    actionBtn(combatTab,"FLING ALL IN REALM",Color3.fromRGB(200,60,60),Color3.fromRGB(255,255,255),no(),function() flingAll() end)
+    actionBtn(combatTab,L("fling_all"),Color3.fromRGB(200,60,60),Color3.fromRGB(255,255,255),no(),function() flingAll() end)
 
-    section(combatTab,"Ward & Revival",no())
-    toggleSwitch(combatTab,"Touch Fling","Anyone who touches you gets void flung",C.TouchFling,no(),function(s) C.TouchFling=s end)
-    toggleSwitch(combatTab,"Second Life","Rejoin the realm when you fall",C.SecondLife,no(),function(s) C.SecondLife=s end)
+    section(combatTab,L("ward"),no())
+    toggleSwitch(combatTab,L("touch_fling"),L("touch_fling_desc"),C.TouchFling,no(),function(s) C.TouchFling=s end)
+    toggleSwitch(combatTab,L("second_life"),L("second_life_desc"),C.SecondLife,no(),function(s) C.SecondLife=s end)
 
-    section(combatTab,"Roles",no())
-    toggleSwitch(combatTab,"Murderer: eliminate all",nil,C.KillMurderer,no(),function(s) C.KillMurderer=s end)
-    toggleSwitch(combatTab,"Auto grab dropped gun",nil,C.AutoGrabGun,no(),function(s) C.AutoGrabGun=s end)
-    toggleSwitch(combatTab,"Reset when full",nil,C.ResetInnocent,no(),function(s) C.ResetInnocent=s end)
-    toggleSwitch(combatTab,"Reset after action",nil,C.ResetAfterAction,no(),function(s) C.ResetAfterAction=s end)
+    section(combatTab,L("roles"),no())
+    toggleSwitch(combatTab,L("elim_all"),nil,C.KillMurderer,no(),function(s) C.KillMurderer=s end)
+    toggleSwitch(combatTab,L("auto_grab"),nil,C.AutoGrabGun,no(),function(s) C.AutoGrabGun=s end)
+    toggleSwitch(combatTab,L("reset_full"),nil,C.ResetInnocent,no(),function(s) C.ResetInnocent=s end)
+    toggleSwitch(combatTab,L("reset_after"),nil,C.ResetAfterAction,no(),function(s) C.ResetAfterAction=s end)
 
+    -- ===== VISUALS =====
     o=0
-    local PLAYER_FEATS={{"Box + Name","ESP"},{"Tracer","TR"},{"Chams","CH"},{"Outline","OL"},{"Glow","HL"},{"3D Box","BX"}}
-    local OBJ_FEATS={{"3D Box","BX"},{"Chams","CH"},{"Outline","OL"},{"Glow","HL"}}
-    section(visualsTab,"Murderer",no())
+    local PLAYER_FEATS={{L("f_box"),"ESP"},{L("f_tracer"),"TR"},{L("f_chams"),"CH"},{L("f_outline"),"OL"},{L("f_glow"),"HL"},{L("f_3dbox"),"BX"}}
+    local OBJ_FEATS={{L("f_3dbox"),"BX"},{L("f_chams"),"CH"},{L("f_outline"),"OL"},{L("f_glow"),"HL"}}
+    section(visualsTab,L("v_murderer"),no())
     visualGrid(visualsTab,"Murderer",PLAYER_FEATS,no())
-    section(visualsTab,"Sheriff",no())
+    section(visualsTab,L("v_sheriff"),no())
     visualGrid(visualsTab,"Sheriff",PLAYER_FEATS,no())
-    section(visualsTab,"Hero",no())
+    section(visualsTab,L("v_hero"),no())
     visualGrid(visualsTab,"Hero",PLAYER_FEATS,no())
-    section(visualsTab,"Innocents",no())
+    section(visualsTab,L("v_innocents"),no())
     visualGrid(visualsTab,"Innocent",PLAYER_FEATS,no())
-    section(visualsTab,"Coins & Pickups",no())
+    section(visualsTab,L("v_coins"),no())
     visualGrid(visualsTab,"Coin",OBJ_FEATS,no())
-    section(visualsTab,"Dropped Guns",no())
+    section(visualsTab,L("v_guns"),no())
     visualGrid(visualsTab,"Gun",OBJ_FEATS,no())
 
+    -- ===== SERVER =====
     o=0
-    section(serverTab,"Realm Hop",no())
-    hint(serverTab,"Fetches the server list via API and uses TeleportToPlaceInstance. Simple and crash-proof.",no(),34)
-    numInput(serverTab,"Auto-hop when players >",C.HopAt,0,50,no(),function(v) C.HopAt=v end)
-    actionBtn(serverTab,"HOP NOW",PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
-    local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,22); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.1; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=9; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  Status: idle"; hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,5)
-    task.spawn(function() while hopLbl.Parent do task.wait(0.5); hopLbl.Text="  Status: "..(C.HopStatus~="" and C.HopStatus or "idle") end end)
+    section(serverTab,L("server_hop"),no())
+    hint(serverTab,L("hop_hint"),no(),24)
+    numInput(serverTab,L("auto_hop"),C.HopAt,0,50,no(),function(v) C.HopAt=v end)
+    actionBtn(serverTab,L("hop_now"),PRIMARY,Color3.fromRGB(0,0,0),no(),function() hopNow() end)
+    local hopLbl=Instance.new("TextLabel"); hopLbl.Size=UDim2.new(1,0,0,22); hopLbl.BackgroundColor3=INSET; hopLbl.BackgroundTransparency=0.1; hopLbl.BorderSizePixel=0; hopLbl.TextColor3=PRIMARY; hopLbl.Font=Enum.Font.Code; hopLbl.TextSize=9; hopLbl.TextXAlignment=Enum.TextXAlignment.Left; hopLbl.TextWrapped=true; hopLbl.Text="  "..L("status")..": "..L("hop_idle"); hopLbl.LayoutOrder=no(); hopLbl.Parent=serverTab; corner(hopLbl,5)
+    task.spawn(function() while hopLbl.Parent do task.wait(0.5); hopLbl.Text="  "..L("status")..": "..(C.HopStatus~="" and C.HopStatus or L("hop_idle")) end end)
 
+    -- ===== MISC =====
     o=0
-    section(miscTab,"Protections",no())
-    toggleSwitch(miscTab,"Anti-AFK",nil,C.AntiAFK,no(),function(s) C.AntiAFK=s; if s then startAFK() end end)
-    toggleSwitch(miscTab,"Anti-Void",nil,C.AntiVoid,no(),function(s) C.AntiVoid=s; setupVoid() end)
-    toggleSwitch(miscTab,"Anti-Fling",nil,C.AntiFling,no(),function(s) C.AntiFling=s end)
-    toggleSwitch(miscTab,"Anti-Murderer",nil,C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
-    toggleSwitch(miscTab,"Noclip","Pauses during fling / snap-shot",C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
-    toggleSwitch(miscTab,"Disable 3D rendering",nil,C.Disable3D,no(),function(s) C.Disable3D=s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
-    section(miscTab,"Map Vote",no())
-    local voteOpts={"OFF","Smallest Map","Largest Map","Random"}
-    local voteMap={OFF=0,["Smallest Map"]=1,["Largest Map"]=2,Random=3}
-    local voteRev={[0]="OFF",[1]="Smallest Map",[2]="Largest Map",[3]="Random"}
-    cycleBtn(miscTab,"Vote mode",voteOpts,voteRev[C.VoteMode] or "OFF",no(),function(v) C.VoteMode=voteMap[v] or 0; if C.VoteMode~=0 then startVote() else stopVote() end end)
-    numInput(miscTab,"Max votes (0 = inf)",C.VoteMax,0,99,no(),function(v) C.VoteMax=v end)
+    cycleBtn(miscTab,L("language"),{"English","Русский","Suomi","Deutsch"},{"English","Russian","Finnish","German"}[C.Language] or "English",no(),function(v)
+        local map={["English"]="English",["Русский"]="Russian",["Suomi"]="Finnish",["Deutsch"]="German"}
+        C.Language = map[v] or "English"
+        save()
+        guiRefs = buildGui()
+        if C.Farming and guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end
+    end)
+    section(miscTab,L("protections"),no())
+    toggleSwitch(miscTab,L("anti_afk"),nil,C.AntiAFK,no(),function(s) C.AntiAFK=s; if s then startAFK() end end)
+    toggleSwitch(miscTab,L("anti_void"),nil,C.AntiVoid,no(),function(s) C.AntiVoid=s; setupVoid() end)
+    toggleSwitch(miscTab,L("anti_fling"),nil,C.AntiFling,no(),function(s) C.AntiFling=s end)
+    toggleSwitch(miscTab,L("anti_murderer"),nil,C.AntiMurderer,no(),function(s) C.AntiMurderer=s end)
+    toggleSwitch(miscTab,L("noclip"),nil,C.Noclip,no(),function(s) C.Noclip=s; if s then startNoclip() else stopNoclip() end end)
+    toggleSwitch(miscTab,L("disable3d"),nil,C.Disable3D,no(),function(s) C.Disable3D=s; pcall(function() RunService:Set3dRenderingEnabled(not s) end) end)
+    section(miscTab,L("map_vote"),no())
+    local voteOptsDisp={L("v_off"),L("v_smallest"),L("v_largest"),L("v_random")}
+    local voteDispToMode={[L("v_off")]=0,[L("v_smallest")]=1,[L("v_largest")]=2,[L("v_random")]=3}
+    local voteModeToDisp={[0]=L("v_off"),[1]=L("v_smallest"),[2]=L("v_largest"),[3]=L("v_random")}
+    cycleBtn(miscTab,L("vote_mode"),voteOptsDisp,voteModeToDisp[C.VoteMode] or voteOptsDisp[1],no(),function(v)
+        C.VoteMode=voteDispToMode[v] or 0
+        if C.VoteMode~=0 then startVote() else stopVote() end
+    end)
+    numInput(miscTab,L("max_votes"),C.VoteMax,0,99,no(),function(v) C.VoteMax=v end)
 
+    -- ===== THEME =====
     o=0
-    section(themeTab,"GUI Scale",no())
-    numInput(themeTab,"Scale (0.4 - 1.6)",C.GuiScale,0.4,1.6,no(),function(v) C.GuiScale=v; if uiScale then uiScale.Scale=v end end)
-    section(themeTab,"Themes",no())
+    section(themeTab,L("gui_scale"),no())
+    numInput(themeTab,L("scale"),C.GuiScale,0.4,1.6,no(),function(v) C.GuiScale=v; if uiScale then uiScale.Scale=v end end)
+    section(themeTab,L("themes"),no())
     local themeRow=Instance.new("Frame"); themeRow.Size=UDim2.new(1,0,0,22); themeRow.BackgroundTransparency=1; themeRow.LayoutOrder=no(); themeRow.Parent=themeTab
     local themeLay=Instance.new("UIListLayout"); themeLay.FillDirection=Enum.FillDirection.Horizontal; themeLay.Padding=UDim.new(0,3); themeLay.Parent=themeRow
     for _,theme in ipairs(THEMES) do
         local tb=Instance.new("TextButton"); tb.Size=UDim2.new(0,44,1,0); tb.BackgroundColor3=theme.p; tb.BackgroundTransparency=0.1; tb.Text=theme.name; tb.TextColor3=Color3.fromRGB(0,0,0); tb.Font=Enum.Font.GothamBold; tb.TextSize=8; tb.BorderSizePixel=0; tb.AutoButtonColor=false; tb.Parent=themeRow; corner(tb,5)
-        tb.MouseButton1Click:Connect(function() C.PrimaryColor=colorToHex(theme.p); C.SecondaryColor=colorToHex(theme.s); PRIMARY=theme.p; SECONDARY=theme.s; save(); buildGui() end)
+        tb.MouseButton1Click:Connect(function() C.PrimaryColor=colorToHex(theme.p); C.SecondaryColor=colorToHex(theme.s); PRIMARY=theme.p; SECONDARY=theme.s; save(); guiRefs=buildGui(); if C.Farming and guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end end)
     end
-    section(themeTab,"Primary Color",no())
+    section(themeTab,L("primary"),no())
     local pPrev=Instance.new("Frame"); pPrev.Size=UDim2.new(1,0,0,14); pPrev.BackgroundColor3=PRIMARY; pPrev.BorderSizePixel=0; pPrev.LayoutOrder=no(); pPrev.Parent=themeTab; corner(pPrev,4)
     local pHue=Instance.new("TextButton"); pHue.Size=UDim2.new(1,0,0,12); pHue.BackgroundColor3=Color3.new(1,1,1); pHue.BorderSizePixel=0; pHue.Text=""; pHue.AutoButtonColor=false; pHue.LayoutOrder=no(); pHue.Parent=themeTab; corner(pHue,4)
     local pHueGrad=Instance.new("UIGradient"); pHueGrad.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(255,0,0)),ColorSequenceKeypoint.new(1/6,Color3.fromRGB(255,255,0)),ColorSequenceKeypoint.new(2/6,Color3.fromRGB(0,255,0)),ColorSequenceKeypoint.new(3/6,Color3.fromRGB(0,255,255)),ColorSequenceKeypoint.new(4/6,Color3.fromRGB(0,0,255)),ColorSequenceKeypoint.new(5/6,Color3.fromRGB(255,0,255)),ColorSequenceKeypoint.new(1,Color3.fromRGB(255,0,0))}); pHueGrad.Parent=pHue
@@ -1245,9 +1736,9 @@ local function buildGui()
     local pGridLay=Instance.new("UIGridLayout"); pGridLay.CellSize=UDim2.new(0,14,0,14); pGridLay.CellPadding=UDim2.new(0,2,0,2); pGridLay.Parent=pGrid
     for _,c in ipairs(PRESETS) do
         local sw=Instance.new("TextButton"); sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.AutoButtonColor=false; sw.Parent=pGrid; corner(sw,3)
-        sw.MouseButton1Click:Connect(function() C.PrimaryColor=colorToHex(c); PRIMARY=c; pPrev.BackgroundColor3=c; save(); buildGui() end)
+        sw.MouseButton1Click:Connect(function() C.PrimaryColor=colorToHex(c); PRIMARY=c; pPrev.BackgroundColor3=c; save(); guiRefs=buildGui(); if C.Farming and guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end end)
     end
-    section(themeTab,"Secondary Color",no())
+    section(themeTab,L("secondary"),no())
     local sPrev=Instance.new("Frame"); sPrev.Size=UDim2.new(1,0,0,14); sPrev.BackgroundColor3=SECONDARY; sPrev.BorderSizePixel=0; sPrev.LayoutOrder=no(); sPrev.Parent=themeTab; corner(sPrev,4); strokeOf(sPrev,Color3.fromRGB(255,255,255),1,0.85)
     local sHue=Instance.new("TextButton"); sHue.Size=UDim2.new(1,0,0,12); sHue.BackgroundColor3=Color3.new(1,1,1); sHue.BorderSizePixel=0; sHue.Text=""; sHue.AutoButtonColor=false; sHue.LayoutOrder=no(); sHue.Parent=themeTab; corner(sHue,4)
     local sHueGrad=pHueGrad:Clone(); sHueGrad.Parent=sHue
@@ -1260,9 +1751,9 @@ local function buildGui()
     local sGridLay=Instance.new("UIGridLayout"); sGridLay.CellSize=UDim2.new(0,14,0,14); sGridLay.CellPadding=UDim2.new(0,2,0,2); sGridLay.Parent=sGrid
     for _,c in ipairs(PRESETS) do
         local sw=Instance.new("TextButton"); sw.BackgroundColor3=c; sw.Text=""; sw.BorderSizePixel=0; sw.AutoButtonColor=false; sw.Parent=sGrid; corner(sw,3)
-        sw.MouseButton1Click:Connect(function() C.SecondaryColor=colorToHex(c); SECONDARY=c; sPrev.BackgroundColor3=c; save(); buildGui() end)
+        sw.MouseButton1Click:Connect(function() C.SecondaryColor=colorToHex(c); SECONDARY=c; sPrev.BackgroundColor3=c; save(); guiRefs=buildGui(); if C.Farming and guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end end)
     end
-    actionBtn(themeTab,"APPLY & REBUILD",PRIMARY,Color3.fromRGB(0,0,0),no(),function() buildGui() end)
+    actionBtn(themeTab,L("rebuild"),PRIMARY,Color3.fromRGB(0,0,0),no(),function() guiRefs=buildGui(); if C.Farming and guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end end)
 
     local collapsed=false
     winBtn(-50,"—",Color3.fromRGB(70,70,80),function()
@@ -1287,18 +1778,28 @@ local function buildGui()
         save(); gui:Destroy(); MAIN_GUI=nil
     end)
 
-    tabs["Main"].btn.MouseButton1Click:Fire()
+    tabs[1] = nil -- keep table clean; access via stored refs below
+    -- open Main tab
+    for name,t in pairs(tabs) do
+        if name == L("tab_main") then t.btn.MouseButton1Click:Fire() end
+    end
     return {farmSwitch=farmSwitch}
 end
 
 local function dismissMobilePicker()
     if not UIS.TouchEnabled then return end
+    if MAIN_GUI then MAIN_GUI.Enabled = false end
     local cam=workspace.CurrentCamera; local vp=cam and cam.ViewportSize or Vector2.new(800,600)
-    for _=1,3 do pcall(function() VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,true,game,0); task.wait(0.08); VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,false,game,0) end); task.wait(0.5) end
+    for _=1,2 do
+        pcall(function() VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,true,game,0); task.wait(0.08); VirtualInputManager:SendMouseButtonEvent(vp.X/2,vp.Y/2,0,false,game,0) end)
+        task.wait(0.4)
+    end
     pcall(function() VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.Return,false,game); task.wait(0.1); VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.Return,false,game) end)
+    if MAIN_GUI then MAIN_GUI.Enabled = true end
 end
 
--- ============ CHARACTER HOOKS (Touch Ward + Second Life) ============
+-- ============ CHARACTER HOOKS (Touch Fling + Second Life) ============
+local touchDebounce = {}
 local function setupCharacterHooks(char)
     local hum = char:FindFirstChildOfClass("Humanoid")
     local hrp = char:FindFirstChild("HumanoidRootPart")
@@ -1321,7 +1822,7 @@ local function setupCharacterHooks(char)
                 local now = tick()
                 if touchDebounce[otherPlr] and now - touchDebounce[otherPlr] < 2 then return end
                 touchDebounce[otherPlr] = now
-                task.spawn(function() flingTarget(otherPlr) end)
+                task.spawn(function() flingTarget(otherPlr, true) end)
             end
         end)
     end
@@ -1343,20 +1844,28 @@ if C.AntiFling then startAntiFling() end
 if C.Noclip then startNoclip() end
 if C.HopAt>0 then hopMonitor() end
 if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end) end
+task.spawn(function() scanShootRemotes(true) end)
 
-local guiRefs = buildGui()
+guiRefs = buildGui()
+
+local function tryAutoLaunch()
+    if not C.AutoLaunch then return end
+    if C.FarmThread and coroutine.status(C.FarmThread) ~= "dead" then return end
+    C.FarmThread = nil
+    farm()
+    if guiRefs and guiRefs.farmSwitch then pcall(function() guiRefs.farmSwitch.set(true) end) end
+end
 
 task.spawn(function()
-    task.wait(5)
+    task.wait(3)
     if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
-    task.wait(2)
+    task.wait(1)
     dismissMobilePicker()
-    if C.AutoLaunch then
-        print("[Lambda] Auto-launch: engaging harvest")
-        C.Farming=true
-        farm()
-        if guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end
-    end
+    tryAutoLaunch()
+    task.wait(4)
+    tryAutoLaunch()
+    task.wait(6)
+    tryAutoLaunch()
 end)
 
-print("[Lambda] v0.48 ready | HWID: "..HWID)
+print("[Lambda] v0.49 ready | HWID: "..HWID)
