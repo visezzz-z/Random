@@ -1,5 +1,4 @@
---// ARCHIVE_ID 2137 | By m1z0sz | Discord: https://discord.gg/TWaKEevhh
--- Lambda Hub | v0.50 | MM2 Script
+-- Lambda Hub | v0.50 | MM2 Script by kerli
 -- Fixed: GUI tab selection error, Added visual notifications, Added execution safeguard
 
 if getgenv().LAMBDA_RUNNING then
