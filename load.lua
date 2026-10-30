@@ -1,9 +1,31 @@
--- Lambda Hub | v0.49 | MM2 Script by kerli
--- Fixed: Shoot Murderer (snap-shot engine restored), Fling returns to start,
--- Server Hop solo-exclusion rule, Stats persist across hops, Auto-launch fixed,
--- Language toggle (EN/RU/FI/DE)
+--// ARCHIVE_ID 2137 | By m1z0sz | Discord: https://discord.gg/TWaKEevhh
+-- Lambda Hub | v0.50 | MM2 Script
+-- Fixed: GUI tab selection error, Added visual notifications, Added execution safeguard
 
-print("[Lambda] v0.49 loading")
+if getgenv().LAMBDA_RUNNING then
+    pcall(function()
+        if getgenv().LAMBDA_NOTIF_GUI then
+            local n = Instance.new("Frame")
+            n.Size = UDim2.new(1, 0, 0, 50)
+            n.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+            n.Parent = getgenv().LAMBDA_NOTIF_GUI:FindFirstChildOfClass("Frame")
+            local t = Instance.new("TextLabel")
+            t.Size = UDim2.new(1,0,1,0)
+            t.BackgroundTransparency = 1
+            t.Text = "Lambda Hub: Already running! Close the GUI to re-execute."
+            t.TextColor3 = Color3.fromRGB(255, 100, 100)
+            t.Font = Enum.Font.GothamBold
+            t.TextSize = 12
+            t.Parent = n
+            task.delay(3, function() pcall(function() n:Destroy() end) end)
+        end
+    end)
+    print("[Lambda] Already running.")
+    return
+end
+getgenv().LAMBDA_RUNNING = true
+
+print("[Lambda] v0.50 loading")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -17,6 +39,89 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local UIS = game:GetService("UserInputService")
 local Stats = game:GetService("Stats")
 local LocalPlayer = Players.LocalPlayer
+
+-- ============ NOTIFICATIONS ============
+local function setupNotifications()
+    if getgenv().LAMBDA_NOTIF_GUI then pcall(function() getgenv().LAMBDA_NOTIF_GUI:Destroy() end) end
+    local notifGui = Instance.new("ScreenGui")
+    notifGui.Name = "LambdaNotifs"
+    notifGui.ResetOnSpawn = false
+    notifGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    notifGui.DisplayOrder = 999998
+    pcall(function() notifGui.Parent = gethui and gethui() or game.CoreGui end)
+    getgenv().LAMBDA_NOTIF_GUI = notifGui
+    
+    local notifContainer = Instance.new("Frame")
+    notifContainer.Size = UDim2.new(0, 300, 1, 0)
+    notifContainer.Position = UDim2.new(1, -320, 0, 0)
+    notifContainer.BackgroundTransparency = 1
+    notifContainer.Parent = notifGui
+    
+    local notifLayout = Instance.new("UIListLayout")
+    notifLayout.Padding = UDim.new(0, 5)
+    notifLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+    notifLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    notifLayout.Parent = notifContainer
+end
+
+local function notify(title, desc, dur)
+    if not getgenv().LAMBDA_NOTIF_GUI then setupNotifications() end
+    local notifGui = getgenv().LAMBDA_NOTIF_GUI
+    if not notifGui then return end
+    local notifContainer = notifGui:FindFirstChildOfClass("Frame")
+    if not notifContainer then return end
+    
+    local n = Instance.new("Frame")
+    n.Size = UDim2.new(1, 0, 0, 50)
+    n.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+    n.BackgroundTransparency = 0.1
+    n.BorderSizePixel = 0
+    n.Parent = notifContainer
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = n
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 200, 0)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.5
+    stroke.Parent = n
+    
+    local ttl = Instance.new("TextLabel")
+    ttl.Size = UDim2.new(1, -10, 0, 18)
+    ttl.Position = UDim2.new(0, 5, 0, 4)
+    ttl.BackgroundTransparency = 1
+    ttl.Text = title
+    ttl.TextColor3 = Color3.fromRGB(255, 200, 0)
+    ttl.Font = Enum.Font.GothamBold
+    ttl.TextSize = 12
+    ttl.TextXAlignment = Enum.TextXAlignment.Left
+    ttl.Parent = n
+    
+    local dsc = Instance.new("TextLabel")
+    dsc.Size = UDim2.new(1, -10, 0, 18)
+    dsc.Position = UDim2.new(0, 5, 0, 24)
+    dsc.BackgroundTransparency = 1
+    dsc.Text = desc
+    dsc.TextColor3 = Color3.fromRGB(220, 220, 220)
+    dsc.Font = Enum.Font.Gotham
+    dsc.TextSize = 11
+    dsc.TextXAlignment = Enum.TextXAlignment.Left
+    dsc.Parent = n
+    
+    task.delay(dur or 3, function()
+        TweenService:Create(n, TweenInfo.new(0.3), {BackgroundTransparency = 1}):Play()
+        TweenService:Create(stroke, TweenInfo.new(0.3), {Transparency = 1}):Play()
+        TweenService:Create(ttl, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
+        TweenService:Create(dsc, TweenInfo.new(0.3), {TextTransparency = 1}):Play()
+        task.wait(0.3)
+        pcall(function() n:Destroy() end)
+    end)
+end
+
+setupNotifications()
+notify("Lambda Hub", "Initializing Archives...", 2)
 
 -- ============ HWID + PREFS ============
 local function hwid()
@@ -570,8 +675,6 @@ local function killAll()
 end
 
 -- ============ FLING ============
--- Spin-overlap fling. returnHome=false keeps the character at the target so
--- repeated attempts don't teleport back and forth; the caller restores origin.
 local function flingTarget(targetPlayer, returnHome)
     if returnHome == nil then returnHome = true end
     local myChar = LocalPlayer.Character
@@ -1182,7 +1285,6 @@ local function hop()
     if C.IsHopping then return end
     C.IsHopping = true
     task.spawn(function()
-        -- persist stats before leaving
         C.StatsTotal = C.Stats.Total
         save()
 
@@ -1190,7 +1292,6 @@ local function hop()
         local ok, cands = pcall(collectServerCandidates)
         if not ok or type(cands) ~= "table" then cands = {} end
 
-        -- Pool rule: exclude 1-player servers if there are 15 or fewer of them
         local ones, others = {}, {}
         for _, s in ipairs(cands) do
             if s.playing == 1 then table.insert(ones, s) else table.insert(others, s) end
@@ -1447,7 +1548,7 @@ local function buildGui()
     local titleBar=Instance.new("Frame"); titleBar.Size=UDim2.new(1,0,0,TITLE_H); titleBar.BackgroundTransparency=1; titleBar.Parent=root
     local dot=Instance.new("Frame"); dot.Size=UDim2.fromOffset(9,9); dot.Position=UDim2.new(0,10,0.5,-4); dot.BackgroundColor3=PRIMARY; dot.BorderSizePixel=0; dot.Parent=titleBar; corner(dot,5)
     local title=Instance.new("TextLabel"); title.Size=UDim2.new(0,70,1,0); title.Position=UDim2.new(0,24,0,0); title.BackgroundTransparency=1; title.Text="LAMBDA"; title.TextColor3=TEXT_BRIGHT; title.Font=Enum.Font.GothamBold; title.TextSize=13; title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=titleBar
-    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.49"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
+    local ver=Instance.new("TextLabel"); ver.Size=UDim2.new(0,40,1,0); ver.Position=UDim2.new(0,84,0,1); ver.BackgroundTransparency=1; ver.Text="v0.50"; ver.TextColor3=PRIMARY; ver.Font=Enum.Font.GothamBold; ver.TextSize=9; ver.TextXAlignment=Enum.TextXAlignment.Left; ver.Parent=titleBar
 
     local function winBtn(xOff, txt, bg, cb)
         local b=Instance.new("TextButton"); b.Size=UDim2.fromOffset(22,18); b.Position=UDim2.new(1,xOff,0.5,-9); b.BackgroundColor3=bg; b.BackgroundTransparency=0.35; b.Text=txt; b.TextColor3=Color3.fromRGB(255,255,255); b.Font=Enum.Font.GothamBold; b.TextSize=11; b.BorderSizePixel=0; b.AutoButtonColor=false; b.Parent=titleBar; corner(b,4)
@@ -1466,6 +1567,20 @@ local function buildGui()
     local content=Instance.new("Frame"); content.Size=UDim2.new(1,-SIDE_W-7,1,-TITLE_H-7); content.Position=UDim2.new(0,SIDE_W+3,0,TITLE_H+3); content.BackgroundTransparency=1; content.Parent=root
 
     local tabs={}
+    local function selectTab(name)
+        for n,t in pairs(tabs) do
+            t.frame.Visible = false
+            TweenService:Create(t.btn,FAST_TWEEN,{BackgroundTransparency=1}):Play()
+            t.btn.TextColor3=TEXT_DIM
+        end
+        local t = tabs[name]
+        if t then
+            t.frame.Visible = true
+            TweenService:Create(t.btn,FAST_TWEEN,{BackgroundTransparency=0.85}):Play()
+            t.btn.TextColor3=PRIMARY
+        end
+    end
+    
     local function newTab(name, ord)
         local b=Instance.new("TextButton"); b.Size=UDim2.new(1,-4,0,25); b.BackgroundColor3=PRIMARY; b.BackgroundTransparency=1; b.Text=name; b.TextColor3=TEXT_DIM; b.Font=Enum.Font.GothamMedium; b.TextSize=9; b.BorderSizePixel=0; b.AutoButtonColor=false; b.LayoutOrder=ord; b.Parent=sidebar; corner(b,6)
         local f=Instance.new("ScrollingFrame"); f.Size=UDim2.new(1,0,1,0); f.BackgroundTransparency=1; f.BorderSizePixel=0; f.ScrollBarThickness=2; f.ScrollBarImageColor3=PRIMARY; f.ScrollBarImageTransparency=0.5; f.ScrollingEnabled=true
@@ -1473,16 +1588,7 @@ local function buildGui()
         local l=Instance.new("UIListLayout"); l.Padding=UDim.new(0,2); l.SortOrder=Enum.SortOrder.LayoutOrder; l.Parent=f
         local p=Instance.new("UIPadding"); p.PaddingTop=UDim.new(0,2); p.PaddingLeft=UDim.new(0,2); p.PaddingRight=UDim.new(0,4); p.PaddingBottom=UDim.new(0,8); p.Parent=f
         tabs[name]={btn=b,frame=f,list=l}
-        b.MouseButton1Click:Connect(function()
-            for _,t in pairs(tabs) do
-                t.frame.Visible=false
-                TweenService:Create(t.btn,FAST_TWEEN,{BackgroundTransparency=1}):Play()
-                t.btn.TextColor3=TEXT_DIM
-            end
-            f.Visible=true
-            TweenService:Create(b,FAST_TWEEN,{BackgroundTransparency=0.85}):Play()
-            b.TextColor3=PRIMARY
-        end)
+        b.MouseButton1Click:Connect(function() selectTab(name) end)
         return f
     end
 
@@ -1688,9 +1794,10 @@ local function buildGui()
 
     -- ===== MISC =====
     o=0
-    cycleBtn(miscTab,L("language"),{"English","Русский","Suomi","Deutsch"},{"English","Russian","Finnish","German"}[C.Language] or "English",no(),function(v)
-        local map={["English"]="English",["Русский"]="Russian",["Suomi"]="Finnish",["Deutsch"]="German"}
-        C.Language = map[v] or "English"
+    local langDisplay = {English="English", Russian="Русский", Finnish="Suomi", German="Deutsch"}
+    local displayToInternal = {["English"]="English", ["Русский"]="Russian", ["Suomi"]="Finnish", ["Deutsch"]="German"}
+    cycleBtn(miscTab,L("language"),{"English","Русский","Suomi","Deutsch"}, langDisplay[C.Language] or "English",no(),function(v)
+        C.Language = displayToInternal[v] or "English"
         save()
         guiRefs = buildGui()
         if C.Farming and guiRefs and guiRefs.farmSwitch then guiRefs.farmSwitch.set(true) end
@@ -1776,13 +1883,11 @@ local function buildGui()
         for _,t in pairs(ESP.draws) do for _,d in pairs(t) do pcall(function() d:Remove() end) end end
         if fovCircle then pcall(function() fovCircle:Remove() end); fovCircle=nil end
         save(); gui:Destroy(); MAIN_GUI=nil
+        getgenv().LAMBDA_RUNNING = false
+        notify("Lambda Hub", "GUI Closed. Safe to re-execute.", 2)
     end)
 
-    tabs[1] = nil -- keep table clean; access via stored refs below
-    -- open Main tab
-    for name,t in pairs(tabs) do
-        if name == L("tab_main") then t.btn.MouseButton1Click:Fire() end
-    end
+    selectTab(L("tab_main"))
     return {farmSwitch=farmSwitch}
 end
 
@@ -1846,6 +1951,7 @@ if C.HopAt>0 then hopMonitor() end
 if C.Disable3D then pcall(function() RunService:Set3dRenderingEnabled(false) end) end
 task.spawn(function() scanShootRemotes(true) end)
 
+notify("Lambda Hub", "Constructing GUI...", 2)
 guiRefs = buildGui()
 
 local function tryAutoLaunch()
@@ -1868,4 +1974,5 @@ task.spawn(function()
     tryAutoLaunch()
 end)
 
-print("[Lambda] v0.49 ready | HWID: "..HWID)
+notify("Lambda Hub", "Lambda Hub v0.50 Ready!", 4)
+print("[Lambda] v0.50 ready | HWID: "..HWID)
